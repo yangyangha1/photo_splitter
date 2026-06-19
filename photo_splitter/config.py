@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 SKIP_DIR_PREFIXES = ("split_output", "split_result", "测试照片输出", "归档", "__pycache__")
 JPEG_QUALITY = 95
 BACKGROUND_MODES = {"auto": "自动判断", "white": "白色/浅色底色", "gray": "灰色/杂色底色", "black": "黑色/深色底色"}

@@ -1,6 +1,7 @@
 param(
     [ValidateSet("v1", "cpu", "cupy-cuda", "all", "opencv", "no-opencv", "gpu-lite")]
     [string]$Variant = "v1",
+    [string]$ReleaseVersion = "",
     [switch]$ReleaseV1
 )
 
@@ -34,10 +35,13 @@ function Get-VariantSuffix {
 }
 
 function Get-ReleaseAppName {
-    param([string]$Item)
-    if ($Item -eq "v1") { return "photo_splitter_v1" }
-    if ($Item -eq "cupy-cuda") { return "photo_splitter_v1_cupy_cuda" }
-    return "photo_splitter_v1_cpu"
+    param(
+        [string]$Item,
+        [string]$Version
+    )
+    if ($Item -eq "v1") { return "photo_splitter_$Version" }
+    if ($Item -eq "cupy-cuda") { return "photo_splitter_$Version`_cupy_cuda" }
+    return "photo_splitter_$Version`_cpu"
 }
 
 function Get-NextDemoVersion {
@@ -196,16 +200,37 @@ function Invoke-WithHiddenCudaToolkit {
     }
 }
 
+function Invoke-WithOptionalToolPath {
+    param(
+        [string]$ToolPath,
+        [scriptblock]$ScriptBlock
+    )
+
+    $savedPath = $env:PATH
+    try {
+        if ($ToolPath -and (Test-Path -LiteralPath $ToolPath)) {
+            $env:PATH = "$ToolPath;$env:PATH"
+        }
+        & $ScriptBlock
+    } finally {
+        $env:PATH = $savedPath
+    }
+}
+
 $variants = if ($Variant -eq "all") {
     @("v1", "cpu", "cupy-cuda")
 } else {
     @(Normalize-Variant -Item $Variant)
 }
+$releaseVersionName = if ($ReleaseV1) { "v1" } elseif ($ReleaseVersion.Trim()) { $ReleaseVersion.Trim() } else { "" }
+if ($releaseVersionName -and $releaseVersionName -notmatch "^v\d+$") {
+    throw "ReleaseVersion must look like v2, v3, etc."
+}
 $nextVersion = Get-NextDemoVersion
 
 foreach ($item in $variants) {
     $suffix = Get-VariantSuffix -Item $item
-    $appName = if ($ReleaseV1) { Get-ReleaseAppName -Item $item } else { "photo_splitter_demo_v$nextVersion`_$suffix" }
+    $appName = if ($releaseVersionName) { Get-ReleaseAppName -Item $item -Version $releaseVersionName } else { "photo_splitter_demo_v$nextVersion`_$suffix" }
     $argsForVariant = Get-PyInstallerArgs -AppName $appName -Item $item
     $generatedSpec = Join-Path $projectRoot "$appName.spec"
 
@@ -214,10 +239,13 @@ foreach ($item in $variants) {
     }
 
     if ($item -eq "cupy-cuda") {
+        $cupyToolPath = Join-Path $projectRoot "build\cupy12_venv\Scripts"
         Invoke-WithHiddenCudaToolkit {
-            pyi-makespec @argsForVariant
-            Add-CupyCudaBinaryFilter -SpecPath $generatedSpec
-            python -m PyInstaller --noconfirm --clean $generatedSpec
+            Invoke-WithOptionalToolPath -ToolPath $cupyToolPath {
+                pyi-makespec @argsForVariant
+                Add-CupyCudaBinaryFilter -SpecPath $generatedSpec
+                python -m PyInstaller --noconfirm --clean $generatedSpec
+            }
         }
     } else {
         python -m PyInstaller --noconfirm --clean @argsForVariant

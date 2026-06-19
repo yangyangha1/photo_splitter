@@ -754,23 +754,47 @@ input[type="range"] {
   filter: brightness(1.06);
 }
 
+.detection-tile.return-highlight {
+  border-color: rgb(61 155 255 / 0.72);
+  box-shadow: 0 0 0 2px rgb(61 155 255 / 0.24), 0 18px 38px rgb(61 155 255 / 0.2), inset 0 1px 0 var(--glass-highlight);
+}
+
 .detection-tile em {
-  color: var(--green);
   font-size: 12px;
   font-style: normal;
   font-weight: 800;
+}
+
+.detection-tile em.detected {
+  color: var(--green);
+}
+
+.detection-tile em.edited {
+  color: var(--violet);
 }
 
 .detection-thumb {
   position: relative;
   overflow: hidden;
   border-radius: 13px;
+  aspect-ratio: 4 / 3;
+  border: 1px solid rgb(255 255 255 / 0.1);
   background: rgb(5 9 14 / 0.5);
 }
 
 .detection-thumb .file-thumb {
   display: block;
   border-radius: 13px;
+}
+
+.detection-thumb .file-icon {
+  width: 100%;
+  height: 100%;
+  border-radius: 13px;
+  color: rgb(143 208 255 / 0.62);
+  background:
+    linear-gradient(135deg, rgb(61 155 255 / 0.12), transparent 46%),
+    rgb(7 13 21 / 0.68);
 }
 
 .mini-box {
@@ -832,6 +856,14 @@ input[type="range"] {
 
 .queue-row.done b {
   color: var(--green);
+}
+
+.queue-row.detected b {
+  color: var(--green);
+}
+
+.queue-row.edited b {
+  color: var(--violet);
 }
 
 .queue-row.failed b {

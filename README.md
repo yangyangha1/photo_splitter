@@ -10,13 +10,13 @@
 
 ## 发布版本
 
-- `photo_splitter_v1.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
-- `photo_splitter_v1_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
-- `photo_splitter_v1_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
+- `photo_splitter_v2.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
+- `photo_splitter_v2_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
+- `photo_splitter_v2_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
 
 ## 功能
 
-- 批量处理：递归扫描 JPG / JPEG / TIF / TIFF，保留子目录结构输出。
+- 批量处理：递归扫描 JPG / JPEG / PNG / TIF / TIFF，保留子目录结构输出。
 - 单独处理：单张图片检测预览，可新增、删除、拖动、缩放、二等分检测框，再确认导出。
 - 单图缩放：单独处理预览区支持鼠标滚轮放大/缩小，检测框会随预览比例同步显示，便于微调。
 - 输出核对：生成分割后的 JPG 和分割预览图，不再额外保存 JSON 报告文件。

@@ -36,6 +36,17 @@ def iter_images(input_path: Path, output_path: Path) -> list[Path]:
     return sorted(images)
 
 
+def normalize_source_page(page: Image.Image) -> Image.Image:
+    """把源图页统一成 RGB；透明 PNG 先铺白底，避免透明区域被转成黑色。"""
+    image = ImageOps.exif_transpose(page)
+    if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        background.alpha_composite(rgba)
+        return background.convert("RGB").copy()
+    return image.convert("RGB").copy()
+
+
 def iter_source_images(source: Path) -> list[tuple[str, Image.Image]]:
     """读取源图片。
 
@@ -47,7 +58,7 @@ def iter_source_images(source: Path) -> list[tuple[str, Image.Image]]:
         page_count = getattr(image, "n_frames", 1)
         for index, page in enumerate(ImageSequence.Iterator(image), start=1):
             stem = source.stem if page_count <= 1 else f"{source.stem}_p{index:03d}"
-            pages.append((stem, ImageOps.exif_transpose(page).convert("RGB").copy()))
+            pages.append((stem, normalize_source_page(page)))
     return pages
 
 

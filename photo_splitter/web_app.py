@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import gc
 import io
 import socket
 import sys
@@ -80,9 +81,17 @@ def json_error(message: str, status: int = 400):
     return jsonify({"ok": False, "error": message}), status
 
 
-def thumb_url_for(path: Path) -> str:
+def thumb_url_for(path: Path, page_stem: str | None = None, max_side: int = 360) -> str:
     """生成本地缩略图接口地址，路径只在本机后端解析，不暴露给外部服务。"""
-    return f"/api/source/thumb?path={quote(str(path), safe='')}"
+    try:
+        stat = path.stat()
+        version = f"{stat.st_mtime_ns}-{stat.st_size}"
+    except OSError:
+        version = str(time.time_ns())
+    url = f"/api/source/thumb?path={quote(str(path), safe='')}&v={version}&size={max(80, min(720, int(max_side)))}"
+    if page_stem:
+        url += f"&page_stem={quote(str(page_stem), safe='')}"
+    return url
 
 
 def scan_item_payload(path: Path, input_root: Path, status: str = "待处理") -> dict[str, Any]:
@@ -101,11 +110,45 @@ def scan_item_payload(path: Path, input_root: Path, status: str = "待处理") -
     }
 
 
+def load_source_page_image(source: Path, page_stem: str | None = None) -> Any:
+    """按需读取源图页。批量结果不常驻图片，进入单图编辑或导出时再临时加载。"""
+    from photo_splitter.io_utils import iter_source_images
+
+    pages = iter_source_images(source)
+    if not pages:
+        raise ValueError("源图没有可读取的页面。")
+    selected_index = 0
+    if page_stem:
+        for index, (stem, _image) in enumerate(pages):
+            if stem == page_stem:
+                selected_index = index
+                break
+    for index, (_stem, image) in enumerate(pages):
+        if index != selected_index:
+            image.close()
+    return pages[selected_index][1]
+
+
 def cache_processed_image(source: Path, page_stem: str, image: Any, boxes: list[tuple[int, int, int, int]], options: dict[str, Any]) -> str:
-    """把检测后的图像留在内存缓存中，供预览、手工修正和最终导出复用。"""
+    """只缓存检测结果元数据，不缓存大图；图片在点击预览或导出时按需重读。"""
     image_id = uuid.uuid4().hex
-    SINGLE_CACHE[image_id] = {"source": str(source), "page_stem": page_stem, "image": image, "boxes": boxes, "options": options}
+    SINGLE_CACHE[image_id] = {
+        "source": str(source),
+        "page_stem": page_stem,
+        "width": image.width,
+        "height": image.height,
+        "boxes": boxes,
+        "options": options,
+    }
     return image_id
+
+
+def image_for_cached_item(item: dict[str, Any]) -> tuple[Any, bool]:
+    """返回缓存项对应图片；第二个返回值表示调用方是否需要负责 close。"""
+    if item.get("image") is not None:
+        return item["image"], False
+    source = Path(str(item["source"]))
+    return load_source_page_image(source, str(item.get("page_stem") or source.stem)), True
 
 
 def detected_item_payload(
@@ -118,7 +161,7 @@ def detected_item_payload(
     boxes: list[tuple[int, int, int, int]],
     status: str = "已检测",
 ) -> dict[str, Any]:
-    """生成批量检测预览用的数据结构，图片本体通过 image_id 从内存缓存读取。"""
+    """生成批量检测预览数据；只保存检测框和尺寸，图片点开时再按需读取。"""
     base = scan_item_payload(source, input_root, status=status)
     if page_count > 1:
         base["name"] = f"{source.name} / {page_stem}"
@@ -127,6 +170,7 @@ def detected_item_payload(
         {
             "image_id": image_id,
             "image_url": f"/api/single/image/{image_id}",
+            "thumb_url": thumb_url_for(source, page_stem, max_side=260),
             "page_stem": page_stem,
             "width": image.width,
             "height": image.height,
@@ -200,7 +244,7 @@ def open_dialog(kind: str, title: str) -> str:
     root.attributes("-topmost", True)
     try:
         if kind == "file":
-            return filedialog.askopenfilename(title=title, filetypes=[("图片文件", "*.jpg *.jpeg *.tif *.tiff"), ("所有文件", "*.*")])
+            return filedialog.askopenfilename(title=title, filetypes=[("图片文件", "*.jpg *.jpeg *.png *.tif *.tiff"), ("所有文件", "*.*")])
         return filedialog.askdirectory(title=title)
     finally:
         root.destroy()
@@ -231,13 +275,21 @@ def api_open_path():
 
 @app.get("/api/source/thumb")
 def api_source_thumb():
-    from photo_splitter.io_utils import iter_source_images
-
     path = Path(str(request.args.get("path") or "")).expanduser()
     if not path.exists():
         return "not found", 404
-    _page_stem, image = iter_source_images(path)[0]
-    return image_to_response(image, max_side=360)
+    page_stem = str(request.args.get("page_stem") or "")
+    try:
+        max_side = max(80, min(720, int(request.args.get("size") or 360)))
+    except (TypeError, ValueError):
+        max_side = 360
+    image = load_source_page_image(path, page_stem)
+    response = image_to_response(image, max_side=max_side)
+    image.close()
+    gc.collect()
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.post("/api/batch/scan")
@@ -275,7 +327,7 @@ def api_batch_detect():
     if not images:
         images = iter_images(input_path, output_path)
     if not images:
-        return json_error("没有找到可处理的 JPG/TIFF 文件。")
+        return json_error("没有找到可处理的 JPG/PNG/TIFF 文件。")
     options = options_from_payload(payload.get("options") or {})
     job_id = uuid.uuid4().hex
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
@@ -317,6 +369,11 @@ def api_batch_detect():
                     image_id = cache_processed_image(source, page_stem, processed, boxes, options)
                     detected_items.append(detected_item_payload(source, input_root, page_stem, len(pages), image_id, processed, boxes))
                     file_box_count += len(boxes)
+                    if processed is not image:
+                        processed.close()
+                    image.close()
+                pages.clear()
+                gc.collect()
                 job["saved"] += file_box_count
                 job["items"][index - 1]["status"] = "已检测"
                 job["items"][index - 1]["saved"] = file_box_count
@@ -388,8 +445,10 @@ def api_batch_export():
                 job["failed"].append({"source": str(item_payload.get("path") or ""), "error": error})
                 job["logs"].append(f"失败：{item_payload.get('name') or image_id}，{error}")
                 continue
+            image = None
+            should_close_image = False
             try:
-                image = cache_item["image"]
+                image, should_close_image = image_for_cached_item(cache_item)
                 source = Path(str(cache_item["source"]))
                 page_stem = str(cache_item.get("page_stem") or source.stem)
                 item_options = options_from_payload(item_payload.get("options") or cache_item.get("options") or options)
@@ -403,15 +462,19 @@ def api_batch_export():
                     clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
                     if clamped[2] - clamped[0] < 5 or clamped[3] - clamped[1] < 5:
                         continue
+                    raw_crop = image.crop(clamped)
                     crop = refine_output_photo(
-                        image.crop(clamped),
+                        raw_crop,
                         white_threshold=int(item_options["white_threshold"]),
                         skew_min_score_gain=float(item_options["skew_min_score_gain"]),
                         auto_face_rotate=bool(item_options["auto_face_rotate"]),
                         background_mode=str(item_options["background_mode"]),
                     )
+                    if crop is not raw_crop:
+                        raw_crop.close()
                     target = unique_output_path(target_dir / f"{image_name}_{box_index:03d}.jpg", overwrite=False)
                     crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
+                    crop.close()
                     saved.append(target)
                 preview = image.copy()
                 draw = ImageDraw.Draw(preview)
@@ -419,6 +482,7 @@ def api_batch_export():
                     draw_preview_box(draw, tuple(box), f"{box_index:03d}", image.width)
                 preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
                 preview.save(preview_path, "JPEG", quality=92)
+                preview.close()
                 job["saved"] += len(saved)
                 job["items"][index - 1]["status"] = "已完成"
                 job["items"][index - 1]["saved"] = len(saved)
@@ -428,6 +492,10 @@ def api_batch_export():
                 job["items"][index - 1]["status"] = "失败"
                 job["failed"].append({"source": str(item_payload.get("path") or ""), "error": error})
                 job["logs"].append(f"失败：{item_payload.get('name') or image_id}，{error}")
+            finally:
+                if should_close_image and image is not None:
+                    image.close()
+                gc.collect()
         job = JOBS[job_id]
         job["status"] = "done"
         job["logs"].append(f"批量导出完成，输出 {job['saved']} 张。")
@@ -452,8 +520,8 @@ def api_batch_item_update():
             "ok": True,
             "image_id": image_id,
             "image_url": f"/api/single/image/{image_id}",
-            "width": item["image"].width,
-            "height": item["image"].height,
+            "width": int(item.get("width") or 1),
+            "height": int(item.get("height") or 1),
             "boxes": [list(box) for box in boxes],
             "box_count": len(boxes),
         }
@@ -487,17 +555,25 @@ def api_single_preview():
     source = Path(str(payload.get("source") or "")).expanduser()
     if not source.exists():
         return json_error("单张照片不存在。")
-    page_stem, image = iter_source_images(source)[0]
+    pages = iter_source_images(source)
+    if not pages:
+        return json_error("单张照片没有可读取的页面。")
+    page_stem, image = pages[0]
+    for _unused_stem, unused_image in pages[1:]:
+        unused_image.close()
     preview_id = uuid.uuid4().hex
-    PREVIEW_CACHE[preview_id] = {"source": str(source), "page_stem": page_stem, "image": image}
+    PREVIEW_CACHE[preview_id] = {"source": str(source), "page_stem": page_stem, "width": image.width, "height": image.height}
+    width, height = image.width, image.height
+    image.close()
+    gc.collect()
     trim_preview_cache()
     return jsonify(
         {
             "ok": True,
             "image_url": f"/api/source/preview/{preview_id}",
             "name": source.name,
-            "width": image.width,
-            "height": image.height,
+            "width": width,
+            "height": height,
         }
     )
 
@@ -507,7 +583,11 @@ def api_source_preview(preview_id: str):
     item = PREVIEW_CACHE.get(preview_id)
     if not item:
         return "not found", 404
-    return image_to_response(item["image"])
+    image = load_source_page_image(Path(str(item["source"])), str(item.get("page_stem") or ""))
+    response = image_to_response(image)
+    image.close()
+    gc.collect()
+    return response
 
 
 @app.post("/api/single/detect")
@@ -520,7 +600,12 @@ def api_single_detect():
     if not source.exists():
         return json_error("单张照片不存在。")
     options = options_from_payload(payload.get("options") or {})
-    page_stem, image = iter_source_images(source)[0]
+    pages = iter_source_images(source)
+    if not pages:
+        return json_error("单张照片没有可读取的页面。")
+    page_stem, image = pages[0]
+    for _unused_stem, unused_image in pages[1:]:
+        unused_image.close()
     # 单图检测使用与批量处理相同的检测入口，保证 UI 预览和最终批量算法一致。
     processed, boxes, _angle = split_image(
         image,
@@ -528,15 +613,19 @@ def api_single_detect():
         float(options["min_area_ratio"]),
         background_mode=str(options["background_mode"]),
     )
-    image_id = uuid.uuid4().hex
-    SINGLE_CACHE[image_id] = {"source": str(source), "page_stem": page_stem, "image": processed, "boxes": boxes, "options": options}
+    image_id = cache_processed_image(source, page_stem, processed, boxes, options)
+    width, height = processed.width, processed.height
+    if processed is not image:
+        processed.close()
+    image.close()
+    gc.collect()
     return jsonify(
         {
             "ok": True,
             "image_id": image_id,
             "image_url": f"/api/single/image/{image_id}",
-            "width": processed.width,
-            "height": processed.height,
+            "width": width,
+            "height": height,
             "boxes": [list(box) for box in boxes],
         }
     )
@@ -547,7 +636,12 @@ def api_single_image(image_id: str):
     item = SINGLE_CACHE.get(image_id)
     if not item:
         return "not found", 404
-    return image_to_response(item["image"])
+    image, should_close_image = image_for_cached_item(item)
+    response = image_to_response(image)
+    if should_close_image:
+        image.close()
+        gc.collect()
+    return response
 
 
 @app.post("/api/single/export")
@@ -569,40 +663,50 @@ def api_single_export():
     output_dir = Path(output_value).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     options = options_from_payload(payload.get("options") or item.get("options") or {})
-    image = item["image"]
-    source_name = safe_name(Path(str(item["source"])).stem or "single_photo")
-    boxes = [tuple(int(v) for v in box) for box in payload.get("boxes", [])]
-    saved: list[Path] = []
-    for index, box in enumerate(boxes, start=1):
-        x1, y1, x2, y2 = box
-        clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
-        if clamped[2] - clamped[0] < 5 or clamped[3] - clamped[1] < 5:
-            continue
-        crop = refine_output_photo(
-            image.crop(clamped),
-            white_threshold=int(options["white_threshold"]),
-            skew_min_score_gain=float(options["skew_min_score_gain"]),
-            auto_face_rotate=bool(options["auto_face_rotate"]),
-            background_mode=str(options["background_mode"]),
+    image, should_close_image = image_for_cached_item(item)
+    try:
+        source_name = safe_name(Path(str(item["source"])).stem or "single_photo")
+        boxes = [tuple(int(v) for v in box) for box in payload.get("boxes", [])]
+        saved: list[Path] = []
+        for index, box in enumerate(boxes, start=1):
+            x1, y1, x2, y2 = box
+            clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
+            if clamped[2] - clamped[0] < 5 or clamped[3] - clamped[1] < 5:
+                continue
+            raw_crop = image.crop(clamped)
+            crop = refine_output_photo(
+                raw_crop,
+                white_threshold=int(options["white_threshold"]),
+                skew_min_score_gain=float(options["skew_min_score_gain"]),
+                auto_face_rotate=bool(options["auto_face_rotate"]),
+                background_mode=str(options["background_mode"]),
+            )
+            if crop is not raw_crop:
+                raw_crop.close()
+            target = unique_output_path(output_dir / f"{source_name}_manual_{index:03d}.jpg", overwrite=False)
+            crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
+            crop.close()
+            saved.append(target)
+        preview = image.copy()
+        draw = ImageDraw.Draw(preview)
+        for index, box in enumerate(boxes, start=1):
+            draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
+        preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
+        preview.save(preview_path, "JPEG", quality=92)
+        preview.close()
+        return jsonify(
+            {
+                "ok": True,
+                "saved": len(saved),
+                "outputs": [str(path) for path in saved],
+                "preview": str(preview_path),
+                "output_dir": str(output_dir),
+            }
         )
-        target = unique_output_path(output_dir / f"{source_name}_manual_{index:03d}.jpg", overwrite=False)
-        crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
-        saved.append(target)
-    preview = image.copy()
-    draw = ImageDraw.Draw(preview)
-    for index, box in enumerate(boxes, start=1):
-        draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
-    preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
-    preview.save(preview_path, "JPEG", quality=92)
-    return jsonify(
-        {
-            "ok": True,
-            "saved": len(saved),
-            "outputs": [str(path) for path in saved],
-            "preview": str(preview_path),
-            "output_dir": str(output_dir),
-        }
-    )
+    finally:
+        if should_close_image:
+            image.close()
+        gc.collect()
 
 
 @app.get("/<path:path>")
@@ -720,7 +824,7 @@ class WindowControlsApi:
         import webview
 
         dialog_type = webview.FileDialog.FOLDER if kind == "directory" else webview.FileDialog.OPEN
-        file_types = ("图片文件 (*.jpg;*.jpeg;*.tif;*.tiff)", "所有文件 (*.*)") if kind == "file" else ()
+        file_types = ("图片文件 (*.jpg;*.jpeg;*.png;*.tif;*.tiff)", "所有文件 (*.*)") if kind == "file" else ()
         selected = WEBVIEW_WINDOW.create_file_dialog(dialog_type=dialog_type, allow_multiple=False, file_types=file_types)
         if not selected:
             return ""

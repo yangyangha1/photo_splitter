@@ -59,7 +59,7 @@ def main() -> int:
     images = iter_images(input_path, output_path)
 
     if not images:
-        print("No JPG/TIFF files found.")
+        print("No JPG/PNG/TIFF files found.")
         return 1
 
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent

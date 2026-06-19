@@ -45,7 +45,7 @@
             <h3>{{ group.name }}</h3>
             <div class="file-grid">
               <article v-for="item in group.items" :key="item.path" class="file-tile">
-                <img v-if="item.thumb_url" class="file-thumb" :src="item.thumb_url" alt="" loading="lazy" />
+                <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" />
                 <div v-else class="file-icon">IMG</div>
                 <strong>{{ item.name }}</strong>
                 <span>{{ item.relative || item.path }}</span>
@@ -54,19 +54,25 @@
           </section>
         </div>
         <div v-else class="batch-preview-content">
-          <div class="file-groups batch-detection-groups">
+          <div ref="batchDetectionRef" class="file-groups batch-detection-groups">
             <section v-for="group in groupedBatchItems" :key="group.name" class="file-group">
               <h3>{{ group.name }}</h3>
               <div class="file-grid batch-detection-grid">
-                <article v-for="item in group.items" :key="item.image_id || item.path" class="file-tile detection-tile" @click="openBatchItem(item)">
+                <article
+                  v-for="item in group.items"
+                  :key="item.image_id || item.path"
+                  class="file-tile detection-tile"
+                  :data-batch-item-id="batchItemKey(item)"
+                  @click="openBatchItem(item, $event)"
+                >
                   <div class="detection-thumb">
-                    <img v-if="item.image_url" class="file-thumb" :src="`${item.image_url}?t=${item.updated_at || 0}`" alt="" loading="lazy" />
+                    <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" />
                     <div v-else class="file-icon">IMG</div>
                     <i v-for="(box, boxIndex) in item.boxes || []" :key="boxIndex" class="mini-box" :style="miniBoxStyle(item, box)"></i>
                   </div>
                   <strong>{{ item.name }}</strong>
                   <span>{{ item.relative || item.path }}</span>
-                  <em>{{ item.edited ? "已修改" : "已检测" }} · 检测框 {{ item.box_count ?? item.boxes?.length ?? 0 }} 个</em>
+                  <em :class="item.edited ? 'edited' : 'detected'">{{ item.edited ? "已修改" : "已检测" }} · 检测框 {{ item.box_count ?? item.boxes?.length ?? 0 }} 个</em>
                 </article>
               </div>
             </section>
@@ -80,7 +86,7 @@
 
       <aside class="right-pane">
         <PanelTitle title="处理队列" />
-        <div class="queue-card">
+        <div ref="batchQueueRef" class="queue-card">
           <div v-for="item in batch.items" :key="item.path" class="queue-row" :class="queueTone(item.status)">
             <span>{{ item.name }}</span>
             <b>{{ item.status }}</b>
@@ -210,7 +216,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import IntroContent from "./components/IntroContent.vue";
 import LogBox from "./components/LogBox.vue";
 import PanelTitle from "./components/PanelTitle.vue";
@@ -221,6 +227,11 @@ import StatBox from "./components/StatBox.vue";
 
 const appIconUrl = "/photo_splitter_icon_preview.png";
 const tab = ref("batch");
+const batchQueueRef = ref(null);
+const batchDetectionRef = ref(null);
+const batchReturnTargetId = ref("");
+const batchReturnScrollTop = ref(0);
+const batchReturnOffsetTop = ref(0);
 const config = reactive({
   presets: [
     { key: "balanced", name: "通用平衡", dark_threshold: 70, min_area_ratio: 0.002, white_threshold: 225, background_mode: "auto", skew_gain_percent: 4 },
@@ -266,6 +277,7 @@ const batch = reactive({
   processing: false,
   detected: false,
   jobMode: "",
+  thumbToken: 0,
 });
 
 const single = reactive({
@@ -322,7 +334,7 @@ const singleActionText = computed(() => {
 });
 
 const batchPreviewSubtitle = computed(() => {
-  if (!batch.items.length) return "选择目录后扫描 JPG / JPEG / TIF / TIFF";
+  if (!batch.items.length) return "选择目录后扫描 JPG / JPEG / PNG / TIF / TIFF";
   if (batch.detected) return `已检测 ${batch.items.length} 张图片，点击任意图片可放大修正检测框`;
   return `已选择 ${batch.items.length} 个文件`;
 });
@@ -333,6 +345,15 @@ const singlePreviewSubtitle = computed(() => {
   }
   return single.boxes.length ? `检测框 ${single.boxes.length} 个` : single.imageUrl ? "已显示源图，点击检测并预览生成检测框" : "选择照片后检测并手动校正检测框";
 });
+
+watch(
+  () => batch.items.map((item) => item.status).join("|"),
+  async () => {
+    await nextTick();
+    scrollBatchQueueToRunning();
+  },
+  { flush: "post" },
+);
 
 const previewScale = computed(() => Math.max(0.001, stage.fitScale * singleZoom.value));
 
@@ -360,6 +381,65 @@ function batchItemKey(item) {
   return item.image_id || `${item.path || ""}::${item.page_stem || ""}`;
 }
 
+function scrollBatchQueueToRunning() {
+  const queue = batchQueueRef.value;
+  if (!queue || queue.scrollHeight <= queue.clientHeight + 2) return;
+  const runningRows = queue.querySelectorAll(".queue-row.running");
+  const target = runningRows[runningRows.length - 1];
+  if (!target) return;
+  const top = target.offsetTop - queue.offsetTop - Math.max(0, (queue.clientHeight - target.clientHeight) / 2);
+  queue.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+}
+
+function waitForFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+function scrollBatchPreviewToItem(itemId, restoreAnchor = false, highlight = false) {
+  const scroller = batchDetectionRef.value;
+  if (!scroller || !itemId) return false;
+  if (batchReturnScrollTop.value > 0) {
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = Math.min(batchReturnScrollTop.value, maxTop);
+  }
+  const target = Array.from(scroller.querySelectorAll(".detection-tile")).find((tile) => tile.dataset.batchItemId === itemId);
+  if (!target) return false;
+
+  const scrollerRect = scroller.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (restoreAnchor) {
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const desiredTop = scroller.scrollTop + targetRect.top - scrollerRect.top - batchReturnOffsetTop.value;
+    scroller.scrollTop = Math.max(0, Math.min(maxTop, desiredTop));
+  }
+
+  const updatedTargetRect = target.getBoundingClientRect();
+  const topGap = updatedTargetRect.top - scrollerRect.top;
+  const bottomGap = updatedTargetRect.bottom - scrollerRect.bottom;
+  if (topGap < 8) {
+    scroller.scrollTop += topGap - 8;
+  } else if (bottomGap > -8) {
+    scroller.scrollTop += bottomGap + 8;
+  }
+  if (highlight) {
+    target.classList.add("return-highlight");
+    window.setTimeout(() => target.classList.remove("return-highlight"), 900);
+  }
+  return true;
+}
+
+async function restoreBatchPreviewPosition(itemId) {
+  await nextTick();
+  let found = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await waitForFrame();
+    found = scrollBatchPreviewToItem(itemId, true, false) || found;
+  }
+  if (found) {
+    scrollBatchPreviewToItem(itemId, true, true);
+  }
+}
+
 function miniBoxStyle(item, box) {
   const width = Math.max(1, Number(item.width || 1));
   const height = Math.max(1, Number(item.height || 1));
@@ -369,6 +449,13 @@ function miniBoxStyle(item, box) {
     width: `${((box[2] - box[0]) / width) * 100}%`,
     height: `${((box[3] - box[1]) / height) * 100}%`,
   };
+}
+
+function sourceThumbUrl(item) {
+  const url = item?.thumb_url || "";
+  if (!url) return "";
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}scan=${batch.thumbToken || Date.now()}`;
 }
 
 async function api(path, body) {
@@ -551,7 +638,9 @@ function runtimeSummary(info) {
 }
 
 function queueTone(status) {
-  if (["已完成", "已检测", "已修改"].includes(status)) return "done";
+  if (status === "已检测") return "detected";
+  if (status === "已修改") return "edited";
+  if (status === "已完成") return "done";
   if (status === "处理中") return "running";
   if (status === "失败") return "failed";
   return "pending";
@@ -628,6 +717,7 @@ async function scanBatch() {
     batch.saved = 0;
     batch.detected = false;
     batch.jobMode = "";
+    batch.thumbToken = Date.now();
     batch.status = `已扫描 ${data.count} 个文件`;
     pushLog(batch.logs, `扫描完成：${data.count} 个文件。`);
   } catch (error) {
@@ -728,6 +818,9 @@ function clearBatch() {
   batch.detected = false;
   batch.jobMode = "";
   batch.status = "未扫描文件";
+  batchReturnTargetId.value = "";
+  batchReturnScrollTop.value = 0;
+  batchReturnOffsetTop.value = 0;
   pushLog(batch.logs, "已清除选择。");
 }
 
@@ -744,12 +837,25 @@ function clearSingle() {
   selectedBox.value = null;
   single.fromBatch = false;
   single.batchImageId = "";
+  batchReturnTargetId.value = "";
+  batchReturnScrollTop.value = 0;
+  batchReturnOffsetTop.value = 0;
   single.status = "请选择单张照片";
   pushLog(single.logs, "已清除选择。");
 }
 
-function openBatchItem(item) {
+function openBatchItem(item, event) {
   if (!item?.image_id) return;
+  const scroller = batchDetectionRef.value;
+  batchReturnScrollTop.value = scroller?.scrollTop || 0;
+  if (scroller && event?.currentTarget) {
+    const scrollerRect = scroller.getBoundingClientRect();
+    const targetRect = event.currentTarget.getBoundingClientRect();
+    batchReturnOffsetTop.value = targetRect.top - scrollerRect.top;
+  } else {
+    batchReturnOffsetTop.value = 0;
+  }
+  batchReturnTargetId.value = batchItemKey(item);
   single.source = item.path || "";
   single.outputDir = batch.outputDir;
   single.imageId = item.image_id;
@@ -774,6 +880,7 @@ function openBatchItem(item) {
 async function returnToBatchPreview() {
   if (!single.fromBatch || !single.batchImageId) {
     tab.value = "batch";
+    await restoreBatchPreviewPosition(batchReturnTargetId.value);
     return;
   }
   try {
@@ -784,6 +891,7 @@ async function returnToBatchPreview() {
     });
     const targetId = single.batchImageId;
     const index = batch.items.findIndex((item) => batchItemKey(item) === targetId || item.image_id === targetId);
+    let returnTargetId = batchReturnTargetId.value || targetId;
     if (index >= 0) {
       batch.items[index] = {
         ...batch.items[index],
@@ -799,6 +907,7 @@ async function returnToBatchPreview() {
         status: "已修改",
         updated_at: Date.now(),
       };
+      returnTargetId = batchItemKey(batch.items[index]);
     }
     batch.saved = batch.items.reduce((sum, item) => sum + Number(item.box_count ?? item.boxes?.length ?? 0), 0);
     batch.status = `已保存修改：${batch.items[index]?.name || "当前图片"}`;
@@ -806,6 +915,8 @@ async function returnToBatchPreview() {
     single.fromBatch = false;
     single.batchImageId = "";
     tab.value = "batch";
+    batchReturnTargetId.value = returnTargetId;
+    await restoreBatchPreviewPosition(returnTargetId);
   } catch (error) {
     showError(error);
   }

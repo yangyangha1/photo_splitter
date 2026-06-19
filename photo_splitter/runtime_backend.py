@@ -262,6 +262,49 @@ def gray_and_channel_range(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return gray, channel_range
 
 
+def _cupy_background_difference_mask(rgb_u8: np.ndarray, bg: np.ndarray, actual_mode: str) -> np.ndarray:
+    """在显存中完成背景差异、灰度、通道差和前景掩膜计算，只把最终 mask 拉回内存。"""
+    import cupy as cp
+
+    gpu_rgb = cp.asarray(rgb_u8)
+    gpu_bg = cp.asarray(bg, dtype=cp.float32)
+
+    diff_gpu = gpu_rgb[:, :, 0].astype(cp.float32)
+    diff_gpu -= gpu_bg[0]
+    cp.square(diff_gpu, out=diff_gpu)
+    for channel_index in (1, 2):
+        channel_diff = gpu_rgb[:, :, channel_index].astype(cp.float32)
+        channel_diff -= gpu_bg[channel_index]
+        cp.square(channel_diff, out=channel_diff)
+        diff_gpu += channel_diff
+    cp.sqrt(diff_gpu, out=diff_gpu)
+
+    gray_gpu = gpu_rgb[:, :, 0].astype(cp.float32)
+    gray_gpu *= cp.float32(0.299)
+    gray_gpu += gpu_rgb[:, :, 1].astype(cp.float32) * cp.float32(0.587)
+    gray_gpu += gpu_rgb[:, :, 2].astype(cp.float32) * cp.float32(0.114)
+
+    min_channel = cp.minimum(cp.minimum(gpu_rgb[:, :, 0], gpu_rgb[:, :, 1]), gpu_rgb[:, :, 2])
+    max_channel = cp.maximum(cp.maximum(gpu_rgb[:, :, 0], gpu_rgb[:, :, 1]), gpu_rgb[:, :, 2])
+    channel_range_gpu = max_channel - min_channel
+
+    if actual_mode == "black":
+        threshold = cp.float32(34.0)
+        plain_background = gray_gpu < cp.float32(65.0)
+    elif actual_mode == "white":
+        threshold = cp.float32(28.0)
+        plain_background = (gray_gpu > cp.float32(210.0)) & (channel_range_gpu < 60)
+    elif actual_mode == "gray":
+        threshold = cp.float32(24.0)
+        plain_background = (diff_gpu < cp.float32(24.0)) & (channel_range_gpu < 65)
+    else:
+        threshold = cp.maximum(cp.float32(26.0), cp.percentile(diff_gpu, 55))
+        plain_background = diff_gpu < threshold * cp.float32(0.75)
+
+    mask_gpu = (diff_gpu > threshold) & ~plain_background
+    return cp.asnumpy(mask_gpu).astype(bool, copy=False)
+
+
 def gray_and_blur(rgb: np.ndarray, kernel_size: int = 5) -> tuple[np.ndarray, np.ndarray]:
     """返回灰度图和高斯模糊图，优先使用 CUDA/OpenCL 可用路径。"""
     rgb_u8 = _rgb_u8(rgb)
@@ -431,11 +474,7 @@ def background_difference_mask(rgb: np.ndarray, actual_mode: str) -> np.ndarray:
 
     if cupy_cuda_available():
         try:
-            import cupy as cp
-
-            gpu_rgb = cp.asarray(rgb_u8, dtype=cp.float32)
-            gpu_bg = cp.asarray(bg, dtype=cp.float32).reshape(1, 1, 3)
-            diff = cp.asnumpy(cp.sqrt(cp.sum((gpu_rgb - gpu_bg) ** 2, axis=2)))
+            return _cupy_background_difference_mask(rgb_u8, bg, actual_mode)
         except Exception:
             diff = np.sqrt(np.sum((rgb_u8.astype(np.float32) - bg.reshape(1, 1, 3)) ** 2, axis=2))
     else:
