@@ -34,16 +34,13 @@
           @apply-preset="applyPreset(batch.options)"
           @parameter-change="logParameterChange(batch.logs, $event)"
         />
-        <button class="primary-action main-action" :disabled="batch.processing" @click="startBatch">开始批量处理</button>
+        <button class="primary-action main-action" :disabled="batch.processing" @click="detectBatch">批量检测</button>
         <p class="status-line">{{ batch.status }}</p>
       </aside>
 
-      <PreviewPane
-        title="批量源文件预览"
-        :subtitle="batch.items.length ? `已选择 ${batch.items.length} 个文件` : '选择目录后扫描 JPG / JPEG / TIF / TIFF'"
-      >
+      <PreviewPane title="批量源文件预览" :subtitle="batchPreviewSubtitle">
         <IntroContent v-if="!batch.items.length" mode="batch" />
-        <div v-else class="file-groups">
+        <div v-else-if="!batch.detected" class="file-groups">
           <section v-for="group in groupedBatchItems" :key="group.name" class="file-group">
             <h3>{{ group.name }}</h3>
             <div class="file-grid">
@@ -55,6 +52,29 @@
               </article>
             </div>
           </section>
+        </div>
+        <div v-else class="batch-preview-content">
+          <div class="file-groups batch-detection-groups">
+            <section v-for="group in groupedBatchItems" :key="group.name" class="file-group">
+              <h3>{{ group.name }}</h3>
+              <div class="file-grid batch-detection-grid">
+                <article v-for="item in group.items" :key="item.image_id || item.path" class="file-tile detection-tile" @click="openBatchItem(item)">
+                  <div class="detection-thumb">
+                    <img v-if="item.image_url" class="file-thumb" :src="`${item.image_url}?t=${item.updated_at || 0}`" alt="" loading="lazy" />
+                    <div v-else class="file-icon">IMG</div>
+                    <i v-for="(box, boxIndex) in item.boxes || []" :key="boxIndex" class="mini-box" :style="miniBoxStyle(item, box)"></i>
+                  </div>
+                  <strong>{{ item.name }}</strong>
+                  <span>{{ item.relative || item.path }}</span>
+                  <em>{{ item.edited ? "已修改" : "已检测" }} · 检测框 {{ item.box_count ?? item.boxes?.length ?? 0 }} 个</em>
+                </article>
+              </div>
+            </section>
+          </div>
+          <div class="preview-footer batch-export-footer">
+            <p class="status-line">{{ batch.status }}</p>
+            <button class="primary-action small export-action" :disabled="batch.processing || !batch.items.length || !batch.outputDir.trim()" @click="exportBatch">确认导出</button>
+          </div>
         </div>
       </PreviewPane>
 
@@ -79,7 +99,7 @@
 
       <div v-if="batch.processing" class="process-shield">
         <div class="liquid-progress">
-          <span>批量处理中</span>
+          <span>{{ batch.jobMode === "export" ? "批量导出中" : "批量检测中" }}</span>
           <strong>{{ batch.status }}</strong>
           <div class="progress-track">
             <i :style="{ width: `${batchProgressPercent}%` }"></i>
@@ -106,8 +126,8 @@
       </aside>
 
       <PreviewPane
-        title="单图检测预览"
-        :subtitle="single.boxes.length ? `检测框 ${single.boxes.length} 个` : single.imageUrl ? '已显示源图，点击检测并预览生成检测框' : '选择照片后检测并手动校正检测框'"
+        :title="single.fromBatch ? '批量单图修正' : '单图检测预览'"
+        :subtitle="singlePreviewSubtitle"
       >
         <IntroContent v-if="!single.imageUrl" mode="single" />
         <div v-else class="single-preview-content">
@@ -135,7 +155,8 @@
           </div>
           <div class="preview-footer">
             <p class="status-line">{{ single.status }}</p>
-            <button v-if="single.boxes.length" class="primary-action small export-action" :disabled="single.processing" @click="exportSingle">确认导出</button>
+            <button v-if="single.fromBatch" class="primary-action small export-action" :disabled="single.processing" @click="returnToBatchPreview">保存并返回批量预览</button>
+            <button v-else-if="single.boxes.length" class="primary-action small export-action" :disabled="single.processing" @click="exportSingle">确认导出</button>
           </div>
         </div>
       </PreviewPane>
@@ -243,6 +264,8 @@ const batch = reactive({
   pending: 0,
   saved: 0,
   processing: false,
+  detected: false,
+  jobMode: "",
 });
 
 const single = reactive({
@@ -260,6 +283,8 @@ const single = reactive({
   detected: false,
   processing: false,
   progressTitle: "正在处理",
+  fromBatch: false,
+  batchImageId: "",
 });
 
 const selectedBox = ref(null);
@@ -296,6 +321,19 @@ const singleActionText = computed(() => {
   return single.detected ? "重新检测" : "检测并预览";
 });
 
+const batchPreviewSubtitle = computed(() => {
+  if (!batch.items.length) return "选择目录后扫描 JPG / JPEG / TIF / TIFF";
+  if (batch.detected) return `已检测 ${batch.items.length} 张图片，点击任意图片可放大修正检测框`;
+  return `已选择 ${batch.items.length} 个文件`;
+});
+
+const singlePreviewSubtitle = computed(() => {
+  if (single.fromBatch) {
+    return single.boxes.length ? `批量修正中 · 检测框 ${single.boxes.length} 个` : "批量修正中，当前图片暂无检测框";
+  }
+  return single.boxes.length ? `检测框 ${single.boxes.length} 个` : single.imageUrl ? "已显示源图，点击检测并预览生成检测框" : "选择照片后检测并手动校正检测框";
+});
+
 const previewScale = computed(() => Math.max(0.001, stage.fitScale * singleZoom.value));
 
 const imageLayerStyle = computed(() => ({
@@ -313,6 +351,25 @@ const displayBoxes = computed(() =>
     },
   })),
 );
+
+function cloneOptions(options) {
+  return JSON.parse(JSON.stringify(options || defaultOptions()));
+}
+
+function batchItemKey(item) {
+  return item.image_id || `${item.path || ""}::${item.page_stem || ""}`;
+}
+
+function miniBoxStyle(item, box) {
+  const width = Math.max(1, Number(item.width || 1));
+  const height = Math.max(1, Number(item.height || 1));
+  return {
+    left: `${(box[0] / width) * 100}%`,
+    top: `${(box[1] / height) * 100}%`,
+    width: `${((box[2] - box[0]) / width) * 100}%`,
+    height: `${((box[3] - box[1]) / height) * 100}%`,
+  };
+}
 
 async function api(path, body) {
   const response = await fetch(path, {
@@ -483,7 +540,7 @@ function runtimeSummary(info) {
 }
 
 function queueTone(status) {
-  if (status === "已完成") return "done";
+  if (["已完成", "已检测", "已修改"].includes(status)) return "done";
   if (status === "处理中") return "running";
   if (status === "失败") return "failed";
   return "pending";
@@ -516,6 +573,8 @@ async function pickFile() {
     if (!path) return;
     single.source = path;
     single.outputDir ||= path.replace(/\\[^\\]+$/, "\\split_result");
+    single.fromBatch = false;
+    single.batchImageId = "";
     pushLog(single.logs, `选择单张照片：${path}`);
     await loadSinglePreview(path);
   } catch (error) {
@@ -551,10 +610,13 @@ async function scanBatch() {
   try {
     if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
     const data = await api("/api/batch/scan", { input_dir: batch.inputDir, output_dir: batch.outputDir });
+    batch.outputDir ||= data.output_dir;
     batch.items = data.items;
     batch.pending = data.count;
     batch.done = 0;
     batch.saved = 0;
+    batch.detected = false;
+    batch.jobMode = "";
     batch.status = `已扫描 ${data.count} 个文件`;
     pushLog(batch.logs, `扫描完成：${data.count} 个文件。`);
   } catch (error) {
@@ -562,12 +624,11 @@ async function scanBatch() {
   }
 }
 
-async function startBatch() {
+async function detectBatch() {
   try {
     if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
-    if (!batch.outputDir.trim()) throw new Error("输出目录为空。");
     if (!batch.items.length) await scanBatch();
-    const data = await api("/api/batch/start", {
+    const data = await api("/api/batch/detect", {
       input_dir: batch.inputDir,
       output_dir: batch.outputDir,
       images: batch.items.map((item) => item.path),
@@ -575,9 +636,35 @@ async function startBatch() {
     });
     batch.jobId = data.job_id;
     batch.serverLogCount = 0;
+    batch.jobMode = "detect";
+    batch.detected = false;
     batch.processing = true;
-    batch.status = "处理中 0 / " + batch.items.length;
-    pushLog(batch.logs, `开始批量处理：${batch.items.length} 个文件。`);
+    batch.status = "检测中 0 / " + batch.items.length;
+    pushLog(batch.logs, `开始批量检测：${batch.items.length} 个文件。`);
+    pollJob();
+  } catch (error) {
+    batch.processing = false;
+    showError(error);
+  }
+}
+
+async function exportBatch() {
+  try {
+    if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
+    if (!batch.outputDir.trim()) throw new Error("输出目录为空。");
+    if (!batch.detected || !batch.items.length) throw new Error("请先完成批量检测。");
+    const data = await api("/api/batch/export", {
+      input_dir: batch.inputDir,
+      output_dir: batch.outputDir,
+      items: batch.items.map((item) => ({ ...item, options: item.options || batch.options })),
+      options: batch.options,
+    });
+    batch.jobId = data.job_id;
+    batch.serverLogCount = 0;
+    batch.jobMode = "export";
+    batch.processing = true;
+    batch.status = "导出中 0 / " + batch.items.length;
+    pushLog(batch.logs, `确认导出开始：${batch.items.length} 个检测结果。`);
     pollJob();
   } catch (error) {
     batch.processing = false;
@@ -592,17 +679,30 @@ async function pollJob() {
     const job = data.job;
     batch.items = job.items;
     batch.done = job.items.filter((item) => item.status === "已完成" || item.status === "失败").length;
+    if (job.kind === "detect") {
+      batch.done = job.status === "done" ? job.items.length : job.index;
+    }
     batch.pending = Math.max(0, job.total - batch.done);
     batch.saved = job.saved;
     job.logs.slice(batch.serverLogCount).forEach((line) => pushLog(batch.logs, line));
     batch.serverLogCount = job.logs.length;
-    batch.status = job.status === "done" ? "处理完成" : `处理中 ${job.index} / ${job.total}`;
+    const runningLabel = job.kind === "export" ? "导出中" : "检测中";
+    const doneLabel = job.kind === "export" ? "导出完成" : "检测完成";
+    batch.status = job.status === "done" ? doneLabel : `${runningLabel} ${job.index} / ${job.total}`;
     if (job.status !== "done") {
       window.setTimeout(pollJob, 700);
       return;
     }
     batch.processing = false;
-    showModal("success", "处理完成", `已输出 ${job.saved} 张照片。`, job.output_dir);
+    if (job.kind === "detect") {
+      batch.detected = true;
+      batch.items = job.items.map((item) => ({ ...item, options: cloneOptions(batch.options), updated_at: Date.now() }));
+      batch.done = batch.items.length;
+      batch.pending = 0;
+      batch.status = `检测完成：${batch.items.length} 张图片，检测框 ${job.saved} 个`;
+      return;
+    }
+    showModal("success", "导出完成", `已输出 ${job.saved} 张照片。`, job.output_dir);
   } catch (error) {
     batch.processing = false;
     showError(error);
@@ -614,6 +714,8 @@ function clearBatch() {
   batch.done = 0;
   batch.pending = 0;
   batch.saved = 0;
+  batch.detected = false;
+  batch.jobMode = "";
   batch.status = "未扫描文件";
   pushLog(batch.logs, "已清除选择。");
 }
@@ -629,8 +731,73 @@ function clearSingle() {
   single.detected = false;
   singleZoom.value = 1;
   selectedBox.value = null;
+  single.fromBatch = false;
+  single.batchImageId = "";
   single.status = "请选择单张照片";
   pushLog(single.logs, "已清除选择。");
+}
+
+function openBatchItem(item) {
+  if (!item?.image_id) return;
+  single.source = item.path || "";
+  single.outputDir = batch.outputDir;
+  single.imageId = item.image_id;
+  single.imageUrl = `${item.image_url}?t=${item.updated_at || Date.now()}`;
+  single.imageWidth = item.width || 1;
+  single.imageHeight = item.height || 1;
+  single.boxes = (item.boxes || []).map((box) => [...box]);
+  single.undo = [];
+  single.options = cloneOptions(item.options || batch.options);
+  single.detected = true;
+  single.processing = false;
+  single.fromBatch = true;
+  single.batchImageId = item.image_id;
+  singleZoom.value = 1;
+  selectedBox.value = single.boxes.length ? 0 : null;
+  single.status = `正在修正批量检测结果：${item.name}`;
+  pushLog(single.logs, `打开批量检测结果：${item.name}，检测框 ${single.boxes.length} 个。`);
+  tab.value = "single";
+  nextTick().then(measureImage);
+}
+
+async function returnToBatchPreview() {
+  if (!single.fromBatch || !single.batchImageId) {
+    tab.value = "batch";
+    return;
+  }
+  try {
+    const data = await api("/api/batch/item", {
+      image_id: single.imageId || single.batchImageId,
+      boxes: single.boxes,
+      options: single.options,
+    });
+    const targetId = single.batchImageId;
+    const index = batch.items.findIndex((item) => batchItemKey(item) === targetId || item.image_id === targetId);
+    if (index >= 0) {
+      batch.items[index] = {
+        ...batch.items[index],
+        image_id: data.image_id,
+        image_url: data.image_url,
+        width: data.width,
+        height: data.height,
+        boxes: data.boxes,
+        box_count: data.box_count,
+        saved: data.box_count,
+        options: cloneOptions(single.options),
+        edited: true,
+        status: "已修改",
+        updated_at: Date.now(),
+      };
+    }
+    batch.saved = batch.items.reduce((sum, item) => sum + Number(item.box_count ?? item.boxes?.length ?? 0), 0);
+    batch.status = `已保存修改：${batch.items[index]?.name || "当前图片"}`;
+    pushLog(batch.logs, `已保存单图修改：${batch.items[index]?.name || targetId}，检测框 ${data.box_count} 个。`);
+    single.fromBatch = false;
+    single.batchImageId = "";
+    tab.value = "batch";
+  } catch (error) {
+    showError(error);
+  }
 }
 
 async function detectSingle() {
