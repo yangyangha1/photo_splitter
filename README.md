@@ -8,6 +8,12 @@
 - 使用releases中编译的程序
 - 如果运行失败，寻求CODEX帮助
 
+## 发布版本
+
+- `photo_splitter_v1.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
+- `photo_splitter_v1_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
+- `photo_splitter_v1_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
+
 ## 功能
 
 - 批量处理：递归扫描 JPG / JPEG / TIF / TIFF，保留子目录结构输出。
@@ -29,7 +35,7 @@
 
 ## GPU 说明
 
-当前代码会检测 CuPy CUDA、OpenCV CUDA、OpenCV OpenCL、OpenCV CPU 和 NumPy CPU 后端。本机当前 OpenCV 为 OpenCL 后端，可用于灰度、模糊、Canny 边缘和部分形态学处理；普通 `opencv-python-headless` 通常不包含 CUDA。
+当前代码会按 CuPy CUDA、OpenCV CUDA、OpenCV OpenCL、OpenCV CPU 和 NumPy CPU 的顺序检测并降级。标准版优先使用 OpenCV/OpenCL；CPU 版会走 NumPy/Pillow 后备路径；CuPy CUDA 版在系统 CUDA 12 runtime 可用时会走 CuPy CUDA。
 
 可以 GPU/硬件后端加速的部分：灰度/通道差预处理、背景差异计算、Canny 边缘、部分 OpenCV 形态学操作、部分 CUDA/OpenCL 图像算子。
 

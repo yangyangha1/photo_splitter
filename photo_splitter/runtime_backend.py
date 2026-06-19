@@ -3,11 +3,66 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
+import traceback
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageFilter
+
+
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+_RUNTIME_ERRORS: dict[str, str] = {}
+
+
+def _remember_runtime_error(key: str, exc: Exception | None) -> None:
+    if exc is None:
+        _RUNTIME_ERRORS.pop(key, None)
+    else:
+        _RUNTIME_ERRORS[key] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+
+
+@lru_cache(maxsize=1)
+def prepare_cuda_dll_directories() -> None:
+    """把系统 CUDA bin 目录加入当前进程 DLL 搜索路径。
+
+    PyInstaller onefile 启动后会优先搜索临时解包目录，Windows 不一定会自动
+    使用 CUDA_PATH 或 PATH 中的 CUDA 目录。这里显式注册，确保 cupy-cuda12x
+    能找到目标机器已安装的 CUDA 12 runtime DLL。
+    """
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+
+    candidates: list[Path] = []
+    for env_name in ("CUDA_PATH", "CUDA_PATH_V12_8", "CUDA_PATH_V12_7", "CUDA_PATH_V12_6"):
+        value = os.environ.get(env_name)
+        if value:
+            candidates.append(Path(value) / "bin")
+
+    for path_item in os.environ.get("PATH", "").split(os.pathsep):
+        if path_item and "CUDA" in path_item.upper():
+            candidates.append(Path(path_item))
+
+    cuda_root = Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA")
+    if cuda_root.exists():
+        candidates.extend(path / "bin" for path in sorted(cuda_root.glob("v12.*"), reverse=True))
+
+    seen: set[str] = set()
+    for directory in candidates:
+        try:
+            resolved = str(directory.resolve())
+        except OSError:
+            continue
+        if resolved in seen or not directory.exists():
+            continue
+        seen.add(resolved)
+        if not any(directory.glob("cudart64_12.dll")):
+            continue
+        try:
+            _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(resolved))
+        except OSError:
+            pass
 
 
 def _rgb_u8(rgb: np.ndarray) -> np.ndarray:
@@ -62,14 +117,17 @@ def cupy_cuda_available() -> bool:
     这里会执行一次小数组上传、计算和下载；任何环节失败都回退到 False。
     """
     try:
+        prepare_cuda_dll_directories()
         import cupy as cp
 
         if cp.cuda.runtime.getDeviceCount() <= 0:
             return False
         test = cp.asarray(np.zeros((8, 8, 3), dtype=np.uint8))
         _ = cp.asnumpy(test.max(axis=2) - test.min(axis=2))
+        _remember_runtime_error("cupy_cuda", None)
         return True
-    except Exception:
+    except Exception as exc:
+        _remember_runtime_error("cupy_cuda", exc)
         return False
 
 
@@ -81,6 +139,7 @@ def opencv_cuda_available() -> bool:
     所以必须用一次真实 GpuMat 运算验证，不能只看 cv2.cuda 是否存在。
     """
     try:
+        prepare_cuda_dll_directories()
         import cv2
 
         if not hasattr(cv2, "cuda") or cv2.cuda.getCudaEnabledDeviceCount() <= 0:
@@ -89,8 +148,10 @@ def opencv_cuda_available() -> bool:
         gpu_mat = cv2.cuda_GpuMat()
         gpu_mat.upload(test)
         _ = cv2.cuda.cvtColor(gpu_mat, cv2.COLOR_RGB2GRAY).download()
+        _remember_runtime_error("opencv_cuda", None)
         return True
-    except Exception:
+    except Exception as exc:
+        _remember_runtime_error("opencv_cuda", exc)
         return False
 
 
@@ -442,6 +503,7 @@ def detect_runtime_environment() -> dict[str, Any]:
         "opencv_available": False,
         "compute_backend": "numpy-cpu",
         "acceleration_note": "",
+        "runtime_errors": {},
     }
 
     try:
@@ -482,10 +544,15 @@ def detect_runtime_environment() -> dict[str, Any]:
 
     backend = get_compute_backend()
     info["compute_backend"] = backend
-    if backend in {"cupy-cuda", "opencv-cuda"}:
+    info["runtime_errors"] = dict(_RUNTIME_ERRORS)
+    if backend == "cupy-cuda":
         info["gpu_backend"] = backend
         info["gpu_available"] = True
-        info["acceleration_note"] = "CUDA 加速已启用：灰度、通道差、边缘和部分形态学会优先走 GPU；轮廓合并、裁切和 JPEG 编码仍由 CPU 完成。"
+        info["acceleration_note"] = "CuPy CUDA 加速已启用：灰度、通道差和背景差异计算会优先走 GPU；轮廓合并、裁切和 JPEG 编码仍由 CPU 完成。"
+    elif backend == "opencv-cuda":
+        info["gpu_backend"] = backend
+        info["gpu_available"] = True
+        info["acceleration_note"] = "OpenCV CUDA 加速已启用：灰度、边缘和部分形态学会优先走 GPU；轮廓合并、裁切和 JPEG 编码仍由 CPU 完成。"
     elif backend == "opencv-opencl":
         info["gpu_backend"] = backend
         info["gpu_available"] = bool(info["gpu_name"])

@@ -527,7 +527,7 @@ function applyPreset(options) {
 function runtimeSummary(info) {
   if (!info) return "系统检测：正在检测运行环境。";
   const backendNames = {
-    "cupy-cuda": "CUDA GPU",
+    "cupy-cuda": "CuPy CUDA GPU",
     "opencv-cuda": "OpenCV CUDA GPU",
     "opencv-opencl": "OpenCV OpenCL 加速",
     "opencv-cpu": "OpenCV CPU",
