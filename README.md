@@ -99,10 +99,6 @@ cd photo_splitter\web_ui
 npm run dev
 ```
 
-<<<<<<< HEAD
-=======
-
->>>>>>> 43ee25b (Simplify ignore rules and remove CLI bat)
 
 ## 开发署名
 
