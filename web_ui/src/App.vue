@@ -1,0 +1,695 @@
+<template>
+  <main class="app-shell">
+    <header class="topbar" @dblclick="handleTopbarDoubleClick">
+      <div class="brand window-drag">
+        <img src="/photo_splitter_icon_preview.png" alt="" />
+        <strong>照片分割器</strong>
+      </div>
+      <div class="topbar-center">
+        <div class="topbar-drag-fill window-drag"></div>
+        <div class="segmented-tabs">
+          <button :class="{ active: tab === 'batch' }" @click="tab = 'batch'">批量处理</button>
+          <button :class="{ active: tab === 'single' }" @click="tab = 'single'">单独处理</button>
+        </div>
+        <div class="topbar-drag-fill window-drag"></div>
+      </div>
+      <div class="topbar-right">
+        <div class="topbar-drag-fill window-drag"></div>
+        <div class="window-controls">
+          <button title="最小化" @click="minimizeWindow">-</button>
+          <button title="最大化/还原" @click="toggleWindowMaximize">□</button>
+          <button class="close" title="关闭" @click="closeWindow">×</button>
+        </div>
+      </div>
+    </header>
+
+    <section v-if="tab === 'batch'" class="workspace">
+      <aside class="left-pane">
+        <PathPicker label="输入目录" v-model="batch.inputDir" @pick="pickDirectory('batchInput')" @commit="scanBatch" />
+        <PathPicker label="输出目录" v-model="batch.outputDir" @pick="pickDirectory('batchOutput')" />
+        <button class="secondary-action clear-action" :disabled="batch.processing" @click="clearBatch">清除选择</button>
+        <ParameterPanel
+          :config="config"
+          :options="batch.options"
+          @apply-preset="applyPreset(batch.options)"
+          @parameter-change="logParameterChange(batch.logs, $event)"
+        />
+        <button class="primary-action main-action" :disabled="batch.processing" @click="startBatch">开始批量处理</button>
+        <p class="status-line">{{ batch.status }}</p>
+      </aside>
+
+      <PreviewPane
+        title="批量源文件预览"
+        :subtitle="batch.items.length ? `已选择 ${batch.items.length} 个文件` : '选择目录后扫描 JPG / JPEG / TIF / TIFF'"
+      >
+        <IntroContent v-if="!batch.items.length" mode="batch" />
+        <div v-else class="file-groups">
+          <section v-for="group in groupedBatchItems" :key="group.name" class="file-group">
+            <h3>{{ group.name }}</h3>
+            <div class="file-grid">
+              <article v-for="item in group.items" :key="item.path" class="file-tile">
+                <img v-if="item.thumb_url" class="file-thumb" :src="item.thumb_url" alt="" loading="lazy" />
+                <div v-else class="file-icon">IMG</div>
+                <strong>{{ item.name }}</strong>
+                <span>{{ item.relative || item.path }}</span>
+              </article>
+            </div>
+          </section>
+        </div>
+      </PreviewPane>
+
+      <aside class="right-pane">
+        <PanelTitle title="处理队列" />
+        <div class="queue-card">
+          <div v-for="item in batch.items" :key="item.path" class="queue-row" :class="queueTone(item.status)">
+            <span>{{ item.name }}</span>
+            <b>{{ item.status }}</b>
+          </div>
+          <p v-if="!batch.items.length" class="muted">未选择文件</p>
+        </div>
+        <PanelTitle title="处理进度" />
+        <div class="stats">
+          <StatBox label="已处理" :value="batch.done" tone="done" />
+          <StatBox label="待处理" :value="batch.pending" tone="pending" />
+          <StatBox label="输出" :value="batch.saved" tone="output" />
+        </div>
+        <PanelTitle title="处理日志" />
+        <LogBox :logs="batch.logs" />
+      </aside>
+
+      <div v-if="batch.processing" class="process-shield">
+        <div class="liquid-progress">
+          <span>批量处理中</span>
+          <strong>{{ batch.status }}</strong>
+          <div class="progress-track">
+            <i :style="{ width: `${batchProgressPercent}%` }"></i>
+          </div>
+          <em>{{ batchProgressPercent }}%</em>
+        </div>
+      </div>
+    </section>
+
+    <section v-else class="workspace">
+      <aside class="left-pane">
+        <PathPicker label="单张照片" v-model="single.source" button-label="选择" @pick="pickFile" @commit="loadSinglePreview(single.source)" />
+        <PathPicker label="输出目录" v-model="single.outputDir" @pick="pickDirectory('singleOutput')" />
+        <button class="secondary-action clear-action" :disabled="single.processing" @click="clearSingle">清除选择</button>
+        <ParameterPanel
+          :config="config"
+          :options="single.options"
+          @apply-preset="applyPreset(single.options)"
+          @parameter-change="logParameterChange(single.logs, $event)"
+        />
+        <button class="primary-action main-action" :disabled="single.processing" @click="detectSingle">
+          {{ singleActionText }}
+        </button>
+      </aside>
+
+      <PreviewPane
+        title="单图检测预览"
+        :subtitle="single.boxes.length ? `检测框 ${single.boxes.length} 个` : single.imageUrl ? '已显示源图，点击检测并预览生成检测框' : '选择照片后检测并手动校正检测框'"
+      >
+        <IntroContent v-if="!single.imageUrl" mode="single" />
+        <div v-else class="single-preview-content">
+          <div ref="stageRef" class="image-stage" :class="{ zoomed: singleZoom > 1.01 }" @wheel.prevent="zoomSinglePreview" @pointerdown.self="selectedBox = null">
+            <div class="image-layer" :style="imageLayerStyle" @pointerdown.self="selectedBox = null">
+              <img ref="imageRef" :src="single.imageUrl" @load="measureImage" />
+              <div
+                v-for="(box, index) in displayBoxes"
+                :key="index"
+                class="box"
+                :class="{ selected: selectedBox === index }"
+                :style="box.style"
+                @pointerdown.stop="startDrag(index, 'move', $event)"
+              >
+                <span>{{ String(index + 1).padStart(3, '0') }}</span>
+                <i v-for="handle in handles" :key="handle" :class="['handle', handle]" @pointerdown.stop="startDrag(index, handle, $event)" />
+              </div>
+            </div>
+          </div>
+          <div class="preview-footer">
+            <p class="status-line">{{ single.status }}</p>
+            <button v-if="single.boxes.length" class="primary-action small export-action" :disabled="single.processing" @click="exportSingle">确认导出</button>
+          </div>
+        </div>
+      </PreviewPane>
+
+      <aside class="right-pane">
+        <PanelTitle title="检测框列表" />
+        <div class="queue-card">
+          <div v-for="(box, index) in single.boxes" :key="index" class="queue-row done" :class="{ active: selectedBox === index }" @click="selectedBox = index">
+            <span>{{ String(index + 1).padStart(3, '0') }}</span>
+            <b>{{ Math.round(box[2] - box[0]) }} x {{ Math.round(box[3] - box[1]) }}</b>
+          </div>
+          <p v-if="!single.boxes.length" class="muted">暂无检测框</p>
+        </div>
+        <PanelTitle title="检测框操作" />
+        <div class="box-action-card">
+          <button :disabled="single.processing" @click="addBox">新增检测框</button>
+          <button :disabled="single.processing" @click="deleteBox">删除选中</button>
+          <button :disabled="single.processing" @click="splitBox('vertical')">纵向二等分</button>
+          <button :disabled="single.processing" @click="splitBox('horizontal')">横向二等分</button>
+          <button :disabled="single.processing" @click="undoBox">撤销</button>
+        </div>
+        <PanelTitle title="单图日志" />
+        <LogBox :logs="single.logs" />
+      </aside>
+
+      <div v-if="single.processing" class="process-shield">
+        <div class="liquid-progress indeterminate">
+          <span>{{ single.progressTitle }}</span>
+          <strong>{{ single.status }}</strong>
+          <div class="progress-track"><i></i></div>
+          <em>处理中</em>
+        </div>
+      </div>
+    </section>
+
+    <div v-if="modal" class="modal-mask">
+      <div class="modal-card" :class="modal.kind || 'info'">
+        <strong>{{ modal.title }}</strong>
+        <p>{{ modal.message }}</p>
+        <div class="modal-actions">
+          <button v-if="modal.path" class="secondary-action modal-button" @click="openModalPath">打开目录</button>
+          <button class="primary-action modal-button" @click="modal = null">关闭</button>
+        </div>
+      </div>
+    </div>
+  </main>
+</template>
+
+<script setup>
+import { computed, nextTick, onMounted, reactive, ref } from "vue";
+import IntroContent from "./components/IntroContent.vue";
+import LogBox from "./components/LogBox.vue";
+import PanelTitle from "./components/PanelTitle.vue";
+import ParameterPanel from "./components/ParameterPanel.vue";
+import PathPicker from "./components/PathPicker.vue";
+import PreviewPane from "./components/PreviewPane.vue";
+import StatBox from "./components/StatBox.vue";
+
+const tab = ref("batch");
+const config = reactive({ presets: [], background_modes: [], default_preset: "balanced" });
+const runtime = ref(null);
+const modal = ref(null);
+
+const defaultOptions = () => ({
+  preset: "balanced",
+  dark_threshold: 70,
+  min_area_ratio: 0.002,
+  white_threshold: 225,
+  background_mode: "auto",
+  skew_gain_percent: 4,
+  auto_face_rotate: false,
+});
+
+const batch = reactive({
+  inputDir: "",
+  outputDir: "",
+  items: [],
+  options: defaultOptions(),
+  status: "未扫描文件",
+  logs: ["批量处理界面已就绪。"],
+  jobId: "",
+  serverLogCount: 0,
+  done: 0,
+  pending: 0,
+  saved: 0,
+  processing: false,
+});
+
+const single = reactive({
+  source: "",
+  outputDir: "",
+  imageId: "",
+  imageUrl: "",
+  imageWidth: 1,
+  imageHeight: 1,
+  boxes: [],
+  undo: [],
+  options: defaultOptions(),
+  status: "请选择单张照片",
+  logs: ["单独处理界面已就绪。"],
+  detected: false,
+  processing: false,
+  progressTitle: "正在处理",
+});
+
+const selectedBox = ref(null);
+const stageRef = ref(null);
+const imageRef = ref(null);
+const singleZoom = ref(1);
+const stage = reactive({ width: 1, height: 1, fitScale: 1 });
+const drag = ref(null);
+const handles = ["nw", "ne", "sw", "se", "n", "s", "w", "e"];
+
+const batchProgressPercent = computed(() => {
+  if (!batch.items.length) return 0;
+  return Math.max(0, Math.min(100, Math.round((batch.done / batch.items.length) * 100)));
+});
+
+const groupedBatchItems = computed(() => {
+  const groups = new Map();
+  batch.items.forEach((item) => {
+    const relative = String(item.relative || item.name || "");
+    const normalized = relative.replaceAll("\\", "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const groupName = parts.length > 1 ? parts.slice(0, -1).join(" / ") : "根目录";
+    if (!groups.has(groupName)) groups.set(groupName, []);
+    groups.get(groupName).push(item);
+  });
+  return Array.from(groups, ([name, items]) => ({ name, items }));
+});
+
+const singleActionText = computed(() => {
+  if (single.processing) return "检测中...";
+  return single.detected ? "重新检测" : "检测并预览";
+});
+
+const previewScale = computed(() => Math.max(0.001, stage.fitScale * singleZoom.value));
+
+const imageLayerStyle = computed(() => ({
+  width: `${Math.max(1, Math.round(single.imageWidth * previewScale.value))}px`,
+  height: `${Math.max(1, Math.round(single.imageHeight * previewScale.value))}px`,
+}));
+
+const displayBoxes = computed(() =>
+  single.boxes.map((box) => ({
+    style: {
+      left: `${box[0] * previewScale.value}px`,
+      top: `${box[1] * previewScale.value}px`,
+      width: `${(box[2] - box[0]) * previewScale.value}px`,
+      height: `${(box[3] - box[1]) * previewScale.value}px`,
+    },
+  })),
+);
+
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json();
+  if (!data.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function pywebviewApi() {
+  return window.pywebview?.api || null;
+}
+
+async function minimizeWindow() {
+  await pywebviewApi()?.minimize();
+}
+
+async function toggleWindowMaximize() {
+  await pywebviewApi()?.toggle_maximize();
+}
+
+async function handleTopbarDoubleClick(event) {
+  if (event.target.closest("button, .segmented-tabs, .window-controls")) return;
+  await toggleWindowMaximize();
+}
+
+async function closeWindow() {
+  await pywebviewApi()?.close();
+}
+
+function showModal(kind, title, message, path = "") {
+  modal.value = { kind, title, message, path };
+}
+
+function showError(error) {
+  showModal("error", "处理失败", error.message || String(error));
+}
+
+async function openModalPath() {
+  if (!modal.value?.path) return;
+  try {
+    await api("/api/open-path", { path: modal.value.path });
+  } catch (error) {
+    showError(error);
+  }
+}
+
+// 统一写日志，保留最近 300 条，避免长时间处理后页面变慢。
+function pushLog(logs, line) {
+  logs.push(line);
+  if (logs.length > 300) logs.splice(0, logs.length - 300);
+}
+
+function logParameterChange(logs, event) {
+  pushLog(logs, `参数调整：${event.name} -> ${event.value}`);
+}
+
+function applyPreset(options) {
+  const preset = config.presets.find((item) => item.key === options.preset) || config.presets[0];
+  if (!preset) return;
+  options.dark_threshold = preset.dark_threshold;
+  options.min_area_ratio = preset.min_area_ratio;
+  options.white_threshold = preset.white_threshold;
+  options.background_mode = preset.background_mode;
+  options.skew_gain_percent = preset.skew_gain_percent;
+}
+
+function runtimeSummary(info) {
+  if (!info) return "系统检测：正在检测运行环境。";
+  const backendNames = {
+    "cupy-cuda": "CUDA GPU",
+    "opencv-cuda": "OpenCV CUDA GPU",
+    "opencv-opencl": "OpenCV OpenCL 加速",
+    "opencv-cpu": "OpenCV CPU",
+    "numpy-cpu": "NumPy CPU",
+  };
+  const gpu = info.gpu_name ? `检测到 GPU：${info.gpu_name}` : "未检测到独立 GPU";
+  const backend = backendNames[info.compute_backend] || info.compute_backend;
+  const note = info.acceleration_note ? `；${info.acceleration_note}` : "";
+  return `系统检测：${gpu}；当前使用算力：${backend}${note}`;
+}
+
+function queueTone(status) {
+  if (status === "已完成") return "done";
+  if (status === "处理中") return "running";
+  if (status === "失败") return "failed";
+  return "pending";
+}
+
+async function pickDirectory(target) {
+  try {
+    const data = await api("/api/dialog", { kind: "directory", title: "选择目录" });
+    if (!data.path) return;
+    if (target === "batchInput") {
+      batch.inputDir = data.path;
+      batch.outputDir ||= `${data.path}\\split_result`;
+      pushLog(batch.logs, `选择输入目录：${data.path}`);
+      await scanBatch();
+    } else if (target === "batchOutput") {
+      batch.outputDir = data.path;
+      pushLog(batch.logs, `选择输出目录：${data.path}`);
+    } else {
+      single.outputDir = data.path;
+      pushLog(single.logs, `选择输出目录：${data.path}`);
+    }
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function pickFile() {
+  try {
+    const data = await api("/api/dialog", { kind: "file", title: "选择单张照片" });
+    if (!data.path) return;
+    single.source = data.path;
+    single.outputDir ||= data.path.replace(/\\[^\\]+$/, "\\split_result");
+    pushLog(single.logs, `选择单张照片：${data.path}`);
+    await loadSinglePreview(data.path);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+// 单图选择后先显示源图预览；检测完成后再替换为带检测框的处理图。
+async function loadSinglePreview(path) {
+  const source = String(path || "").trim();
+  if (!source) return;
+  try {
+    const data = await api("/api/single/preview", { source });
+    single.imageId = "";
+    single.imageUrl = `${data.image_url}?t=${Date.now()}`;
+    single.imageWidth = data.width;
+    single.imageHeight = data.height;
+    single.boxes = [];
+    single.undo = [];
+    single.detected = false;
+    singleZoom.value = 1;
+    selectedBox.value = null;
+    single.status = "已显示源图，点击检测并预览。";
+    pushLog(single.logs, `源图预览已载入：${data.name}，尺寸 ${data.width}×${data.height}`);
+    await nextTick();
+    measureImage();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function scanBatch() {
+  try {
+    if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
+    const data = await api("/api/batch/scan", { input_dir: batch.inputDir, output_dir: batch.outputDir });
+    batch.items = data.items;
+    batch.pending = data.count;
+    batch.done = 0;
+    batch.saved = 0;
+    batch.status = `已扫描 ${data.count} 个文件`;
+    pushLog(batch.logs, `扫描完成：${data.count} 个文件。`);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function startBatch() {
+  try {
+    if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
+    if (!batch.outputDir.trim()) throw new Error("输出目录为空。");
+    if (!batch.items.length) await scanBatch();
+    const data = await api("/api/batch/start", {
+      input_dir: batch.inputDir,
+      output_dir: batch.outputDir,
+      images: batch.items.map((item) => item.path),
+      options: batch.options,
+    });
+    batch.jobId = data.job_id;
+    batch.serverLogCount = 0;
+    batch.processing = true;
+    batch.status = "处理中 0 / " + batch.items.length;
+    pushLog(batch.logs, `开始批量处理：${batch.items.length} 个文件。`);
+    pollJob();
+  } catch (error) {
+    batch.processing = false;
+    showError(error);
+  }
+}
+
+async function pollJob() {
+  if (!batch.jobId) return;
+  try {
+    const data = await api(`/api/jobs/${batch.jobId}`);
+    const job = data.job;
+    batch.items = job.items;
+    batch.done = job.items.filter((item) => item.status === "已完成" || item.status === "失败").length;
+    batch.pending = Math.max(0, job.total - batch.done);
+    batch.saved = job.saved;
+    job.logs.slice(batch.serverLogCount).forEach((line) => pushLog(batch.logs, line));
+    batch.serverLogCount = job.logs.length;
+    batch.status = job.status === "done" ? "处理完成" : `处理中 ${job.index} / ${job.total}`;
+    if (job.status !== "done") {
+      window.setTimeout(pollJob, 700);
+      return;
+    }
+    batch.processing = false;
+    showModal("success", "处理完成", `已输出 ${job.saved} 张照片。`, job.output_dir);
+  } catch (error) {
+    batch.processing = false;
+    showError(error);
+  }
+}
+
+function clearBatch() {
+  batch.items = [];
+  batch.done = 0;
+  batch.pending = 0;
+  batch.saved = 0;
+  batch.status = "未扫描文件";
+  pushLog(batch.logs, "已清除选择。");
+}
+
+function clearSingle() {
+  single.source = "";
+  single.imageId = "";
+  single.imageUrl = "";
+  single.imageWidth = 1;
+  single.imageHeight = 1;
+  single.boxes = [];
+  single.undo = [];
+  single.detected = false;
+  singleZoom.value = 1;
+  selectedBox.value = null;
+  single.status = "请选择单张照片";
+  pushLog(single.logs, "已清除选择。");
+}
+
+async function detectSingle() {
+  try {
+    if (!single.source.trim()) throw new Error("单张照片为空。");
+    single.processing = true;
+    single.progressTitle = single.detected ? "正在重新检测" : "正在检测并生成预览";
+    single.status = single.detected ? "正在重新检测..." : "正在检测...";
+    pushLog(single.logs, single.detected ? "重新检测开始。" : "检测并预览开始。");
+    const data = await api("/api/single/detect", { source: single.source, options: single.options });
+    single.imageId = data.image_id;
+    single.imageUrl = `${data.image_url}?t=${Date.now()}`;
+    single.imageWidth = data.width;
+    single.imageHeight = data.height;
+    single.boxes = data.boxes;
+    single.undo = [];
+    single.detected = true;
+    selectedBox.value = single.boxes.length ? 0 : null;
+    single.status = `检测到 ${single.boxes.length} 个检测框`;
+    pushLog(single.logs, `检测完成：${single.boxes.length} 个检测框。`);
+    await nextTick();
+    measureImage();
+  } catch (error) {
+    showError(error);
+  } finally {
+    single.processing = false;
+  }
+}
+
+function measureImage() {
+  const wrap = stageRef.value;
+  if (!wrap || !single.imageWidth || !single.imageHeight) return;
+  const availableWidth = Math.max(1, wrap.clientWidth - 36);
+  const availableHeight = Math.max(1, wrap.clientHeight - 36);
+  stage.width = availableWidth;
+  stage.height = availableHeight;
+  stage.fitScale = Math.max(0.001, Math.min(1, availableWidth / single.imageWidth, availableHeight / single.imageHeight));
+}
+
+async function zoomSinglePreview(event) {
+  if (!single.imageUrl) return;
+  const wrap = stageRef.value;
+  if (!wrap) return;
+  const oldScale = previewScale.value;
+  const rect = wrap.getBoundingClientRect();
+  const offsetX = event.clientX - rect.left;
+  const offsetY = event.clientY - rect.top;
+  const ratio = event.deltaY > 0 ? 0.9 : 1.12;
+  singleZoom.value = Math.max(0.35, Math.min(4, singleZoom.value * ratio));
+  await nextTick();
+  measureImage();
+  const scaleRatio = previewScale.value / oldScale;
+  wrap.scrollLeft = (wrap.scrollLeft + offsetX) * scaleRatio - offsetX;
+  wrap.scrollTop = (wrap.scrollTop + offsetY) * scaleRatio - offsetY;
+}
+
+function pushUndo() {
+  single.undo.push(single.boxes.map((box) => [...box]));
+  if (single.undo.length > 30) single.undo.shift();
+}
+
+function addBox() {
+  if (!single.imageUrl) return;
+  pushUndo();
+  const w = single.imageWidth;
+  const h = single.imageHeight;
+  single.boxes.push([Math.round(w * 0.25), Math.round(h * 0.25), Math.round(w * 0.75), Math.round(h * 0.75)]);
+  selectedBox.value = single.boxes.length - 1;
+  pushLog(single.logs, "手动新增检测框。");
+}
+
+function deleteBox() {
+  if (selectedBox.value == null) return;
+  pushUndo();
+  single.boxes.splice(selectedBox.value, 1);
+  selectedBox.value = single.boxes.length ? Math.min(selectedBox.value, single.boxes.length - 1) : null;
+  pushLog(single.logs, "删除选中检测框。");
+}
+
+function undoBox() {
+  const prev = single.undo.pop();
+  if (!prev) return;
+  single.boxes = prev;
+  pushLog(single.logs, "已撤销上一步检测框调整。");
+}
+
+function splitBox(direction) {
+  if (selectedBox.value == null) return;
+  const box = single.boxes[selectedBox.value];
+  pushUndo();
+  if (direction === "vertical") {
+    const mid = Math.round((box[0] + box[2]) / 2);
+    single.boxes.splice(selectedBox.value, 1, [box[0], box[1], mid, box[3]], [mid, box[1], box[2], box[3]]);
+    pushLog(single.logs, "选中检测框已纵向二等分。");
+  } else {
+    const mid = Math.round((box[1] + box[3]) / 2);
+    single.boxes.splice(selectedBox.value, 1, [box[0], box[1], box[2], mid], [box[0], mid, box[2], box[3]]);
+    pushLog(single.logs, "选中检测框已横向二等分。");
+  }
+}
+
+function startDrag(index, mode, event) {
+  selectedBox.value = index;
+  pushUndo();
+  drag.value = { index, mode, startX: event.clientX, startY: event.clientY, startBox: [...single.boxes[index]] };
+  window.addEventListener("pointermove", onDrag);
+  window.addEventListener("pointerup", stopDrag, { once: true });
+}
+
+function onDrag(event) {
+  if (!drag.value || !previewScale.value) return;
+  const { index, mode, startX, startY, startBox } = drag.value;
+  const dx = (event.clientX - startX) / previewScale.value;
+  const dy = (event.clientY - startY) / previewScale.value;
+  let [x1, y1, x2, y2] = startBox;
+  if (mode === "move") {
+    x1 += dx;
+    x2 += dx;
+    y1 += dy;
+    y2 += dy;
+  } else {
+    if (mode.includes("w")) x1 += dx;
+    if (mode.includes("e")) x2 += dx;
+    if (mode.includes("n")) y1 += dy;
+    if (mode.includes("s")) y2 += dy;
+  }
+  x1 = Math.max(0, Math.min(single.imageWidth - 10, x1));
+  y1 = Math.max(0, Math.min(single.imageHeight - 10, y1));
+  x2 = Math.max(x1 + 10, Math.min(single.imageWidth, x2));
+  y2 = Math.max(y1 + 10, Math.min(single.imageHeight, y2));
+  single.boxes[index] = [Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)];
+}
+
+function stopDrag() {
+  drag.value = null;
+  window.removeEventListener("pointermove", onDrag);
+}
+
+async function exportSingle() {
+  try {
+    single.processing = true;
+    single.progressTitle = "正在导出";
+    single.status = "正在导出选中检测框...";
+    pushLog(single.logs, "确认导出开始。");
+    const data = await api("/api/single/export", {
+      image_id: single.imageId,
+      output_dir: single.outputDir,
+      boxes: single.boxes,
+      options: single.options,
+    });
+    single.status = "导出完成";
+    pushLog(single.logs, `导出完成：${data.saved} 张照片。`);
+    showModal("success", "导出完成", `已导出 ${data.saved} 张照片。`, data.output_dir || single.outputDir);
+  } catch (error) {
+    showError(error);
+  } finally {
+    single.processing = false;
+  }
+}
+
+onMounted(async () => {
+  const [cfg, rt] = await Promise.all([api("/api/config"), api("/api/runtime")]);
+  Object.assign(config, cfg);
+  runtime.value = rt.runtime;
+  batch.options.preset = cfg.default_preset;
+  single.options.preset = cfg.default_preset;
+  applyPreset(batch.options);
+  applyPreset(single.options);
+  const runtimeLine = runtimeSummary(runtime.value);
+  pushLog(batch.logs, runtimeLine);
+  pushLog(batch.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
+  pushLog(single.logs, runtimeLine);
+  pushLog(single.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
+  window.addEventListener("resize", measureImage);
+});
+</script>
