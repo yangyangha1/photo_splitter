@@ -2,25 +2,6 @@
 
 用于把扫描件、相册拼版、多张照片同页图片自动分割为独立 JPG。当前版本已拆分为 `photo_splitter/` 模块，主界面已重构为 Vue 桌面 UI，并提供批量处理和单独处理两个页面。
 
-## 运行
-
-双击：
-
-```bat
-run_gui.bat
-```
-
-或命令行运行 Vue 桌面 UI：
-
-```bat
-python -m photo_splitter.web_app
-```
-
-CLI 批量处理：
-
-```bat
-python -m photo_splitter.cli 测试照片 -o 输出 --preset balanced --background-mode auto --preview
-```
 
 ## 功能
 
@@ -113,55 +94,6 @@ cd photo_splitter\web_ui
 npm run dev
 ```
 
-## 打包 Demo EXE
-
-当前 demo 使用 `photo_splitter/assets/photo_splitter_icon.ico` 作为 Windows 程序图标，并保留透明底、多尺寸图层和右下角下载箭头。单文件打包默认保留 OpenCV 以支持 OpenCL 加速和人脸方向检测，排除 CuPy/Torch、tkinter/Tcl 和其它不用的 GUI 后端等大体积可选库。
-
-重新打包使用版本化脚本，脚本会自动编译 Vue，并生成递增文件名。默认生成带 OpenCV 版本：
-
-```bat
-powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1
-```
-
-生成无 OpenCV 轻量版本：
-
-```bat
-powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1 -Variant no-opencv
-```
-
-一次生成带 OpenCV 和无 OpenCV 两个版本：
-
-```bat
-powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1 -Variant all
-```
-
-生成文件位于：
-
-```text
-dist/photo_splitter_demo_v7_opencv.exe
-dist/photo_splitter_demo_v7_no_opencv.exe
-```
-
-如果需要 NVIDIA CUDA 级别加速，需要额外安装 CuPy 或 CUDA 编译版 OpenCV 后再打包；这会明显增加依赖和程序体积。
-
-## GitHub 发布
-
-当前仓库已整理为源代码集中在 `photo_splitter/` 内、根目录只保留启动 bat、README 和测试/归档/输出等本地目录的结构；测试照片、输出目录、归档目录、`dist/` 和 `build/` 默认不进入 Git。
-
-首次发布推荐流程：
-
-```bat
-winget install --id GitHub.cli
-gh auth login
-gh repo create photo_splitter --private --source . --remote origin --push
-```
-
-如果远程仓库已存在：
-
-```bat
-git remote add origin https://github.com/<你的账号>/photo_splitter.git
-git push -u origin main
-```
 
 ## 开发署名
 
