@@ -267,12 +267,12 @@ button:disabled {
 }
 
 .window-controls button {
-  width: 34px;
-  height: 30px;
+  width: 40px;
+  height: 34px;
   border-radius: 999px;
   background: transparent;
   color: #d7e0ed;
-  font-size: 15px;
+  font-size: 18px;
   font-weight: 800;
   line-height: 1;
   transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease, filter 0.16s ease;
@@ -610,10 +610,12 @@ input[type="range"] {
 }
 
 .intro-cards article {
-  min-height: 118px;
+  height: 148px;
   padding: 14px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
+  overflow: hidden;
 }
 
 .intro-cards span,
@@ -623,9 +625,21 @@ input[type="range"] {
   line-height: 1.6;
 }
 
-.intro-cards b,
-.intro-full > b {
+.intro-cards span {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.intro-cards b {
   font-size: 14px;
+}
+
+.intro-full > b {
+  display: block;
+  color: var(--blue);
+  font-size: 18px;
+  margin-bottom: 10px;
 }
 
 .intro p b,

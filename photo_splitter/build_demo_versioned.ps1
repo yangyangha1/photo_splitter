@@ -130,9 +130,41 @@ function Get-PyInstallerArgs {
 function Add-CupyCudaBinaryFilter {
     param([string]$SpecPath)
 
-    # CuPy 版依赖目标机器已有 CUDA 12 runtime，因此不把 pip 附带的完整 NVIDIA 运行库打进 EXE。
-    $filterCodeBase64 = "CmRlZiBfa2VlcF9jdXB5X2N1ZGFfYmluYXJ5KGVudHJ5KToKICAgICIiIkN1UHkgcmVsZWFzZSBrZWVwcyBDVURBIGVudHJ5IHBvaW50cyBidXQgZG9lcyBub3QgYnVuZGxlIGZ1bGwgTlZJRElBIHJ1bnRpbWUgRExMcy4iIiIKICAgIHRhcmdldCA9IHN0cihlbnRyeVswXSkucmVwbGFjZSgnLycsICdcXCcpLmxvd2VyKCkKICAgIHNvdXJjZSA9IHN0cihlbnRyeVsxXSkucmVwbGFjZSgnLycsICdcXCcpLmxvd2VyKCkgaWYgbGVuKGVudHJ5KSA+IDEgZWxzZSAnJwogICAgZmlsZV9uYW1lID0gdGFyZ2V0LnJzcGxpdCgnXFwnLCAxKVstMV0KICAgIGN1ZGFfcnVudGltZV9wcmVmaXhlcyA9ICgKICAgICAgICAnY3VibGFzJywKICAgICAgICAnY3VkYXJ0JywKICAgICAgICAnY3VmZnQnLAogICAgICAgICdjdXJhbmQnLAogICAgICAgICdjdXNvbHZlcicsCiAgICAgICAgJ2N1c3BhcnNlJywKICAgICAgICAnY3VwdGknLAogICAgICAgICducHAnLAogICAgICAgICdudmZhdGJpbicsCiAgICAgICAgJ252aml0bGluaycsCiAgICAgICAgJ252cnRjJywKICAgICAgICAnbnZwdHhjb21waWxlcicsCiAgICApCiAgICBidW5kbGVkX252aWRpYV9ydW50aW1lID0gJ1xcc2l0ZS1wYWNrYWdlc1xcbnZpZGlhXFwnIGluIHNvdXJjZSBvciB0YXJnZXQuc3RhcnRzd2l0aCgnbnZpZGlhXFwnKQogICAgY3VkYV9ydW50aW1lX2RsbCA9IGZpbGVfbmFtZS5lbmRzd2l0aCgnLmRsbCcpIGFuZCBmaWxlX25hbWUuc3RhcnRzd2l0aChjdWRhX3J1bnRpbWVfcHJlZml4ZXMpCiAgICByZXR1cm4gbm90IChidW5kbGVkX252aWRpYV9ydW50aW1lIG9yIGN1ZGFfcnVudGltZV9kbGwpCgoKYS5iaW5hcmllcyA9IFRPQyhbZW50cnkgZm9yIGVudHJ5IGluIGEuYmluYXJpZXMgaWYgX2tlZXBfY3VweV9jdWRhX2JpbmFyeShlbnRyeSldKQo="
-    $filterCode = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($filterCodeBase64))
+    # CuPy release depends on the target machine's CUDA 12 runtime.
+    $filterLines = @(
+        'def _keep_cupy_cuda_payload(entry):',
+        '    """Keep CuPy entry modules but do not bundle CUDA/NVIDIA runtime DLLs."""',
+        '    target = str(entry[0]).replace("/", "\\").lower()',
+        '    source = str(entry[1]).replace("/", "\\").lower() if len(entry) > 1 else ""',
+        '    file_name = target.rsplit("\\", 1)[-1]',
+        '    cuda_runtime_prefixes = (',
+        '        "cublas",',
+        '        "cudart",',
+        '        "cufft",',
+        '        "curand",',
+        '        "cusolver",',
+        '        "cusparse",',
+        '        "cupti",',
+        '        "npp",',
+        '        "nvfatbin",',
+        '        "nvjitlink",',
+        '        "nvrtc",',
+        '        "nvptxcompiler",',
+        '    )',
+        '    runtime_dirs = (',
+        '        "\\site-packages\\nvidia\\",',
+        '        "\\nvidia gpu computing toolkit\\cuda\\",',
+        '    )',
+        '    is_runtime_dll = file_name.endswith(".dll") and file_name.startswith(cuda_runtime_prefixes)',
+        '    is_runtime_path = target.startswith("nvidia\\") or any(part in source for part in runtime_dirs)',
+        '    return not (is_runtime_dll or is_runtime_path)',
+        '',
+        '',
+        'a.binaries = [entry for entry in a.binaries if _keep_cupy_cuda_payload(entry)]',
+        'a.datas = [entry for entry in a.datas if _keep_cupy_cuda_payload(entry)]',
+        ''
+    )
+    $filterCode = ($filterLines -join "`r`n") + "`r`n"
 
     $specText = Get-Content -LiteralPath $SpecPath -Raw
     if ($specText -notmatch "(?m)^pyz = PYZ\(a\.pure\)") {
@@ -141,6 +173,27 @@ function Add-CupyCudaBinaryFilter {
 
     $specText = $specText -replace "(?m)^pyz = PYZ\(a\.pure\)", "$filterCode`r`npyz = PYZ(a.pure)"
     Set-Content -LiteralPath $SpecPath -Value $specText -Encoding UTF8
+}
+
+function Invoke-WithHiddenCudaToolkit {
+    param([scriptblock]$ScriptBlock)
+
+    $savedPath = $env:PATH
+    $savedCudaPath = $env:CUDA_PATH
+    $savedCudaPathV128 = $env:CUDA_PATH_V12_8
+
+    try {
+        $env:PATH = (($env:PATH -split ";") | Where-Object {
+                $_ -and ($_ -notmatch "\\NVIDIA GPU Computing Toolkit\\CUDA\\v[0-9.]+\\bin")
+            }) -join ";"
+        Remove-Item Env:CUDA_PATH -ErrorAction SilentlyContinue
+        Remove-Item Env:CUDA_PATH_V12_8 -ErrorAction SilentlyContinue
+        & $ScriptBlock
+    } finally {
+        $env:PATH = $savedPath
+        if ($null -ne $savedCudaPath) { $env:CUDA_PATH = $savedCudaPath } else { Remove-Item Env:CUDA_PATH -ErrorAction SilentlyContinue }
+        if ($null -ne $savedCudaPathV128) { $env:CUDA_PATH_V12_8 = $savedCudaPathV128 } else { Remove-Item Env:CUDA_PATH_V12_8 -ErrorAction SilentlyContinue }
+    }
 }
 
 $variants = if ($Variant -eq "all") {
@@ -161,9 +214,11 @@ foreach ($item in $variants) {
     }
 
     if ($item -eq "cupy-cuda") {
-        pyi-makespec @argsForVariant
-        Add-CupyCudaBinaryFilter -SpecPath $generatedSpec
-        python -m PyInstaller --noconfirm --clean $generatedSpec
+        Invoke-WithHiddenCudaToolkit {
+            pyi-makespec @argsForVariant
+            Add-CupyCudaBinaryFilter -SpecPath $generatedSpec
+            python -m PyInstaller --noconfirm --clean $generatedSpec
+        }
     } else {
         python -m PyInstaller --noconfirm --clean @argsForVariant
     }
