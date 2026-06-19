@@ -18,10 +18,10 @@ echo Working directory: "%SCRIPT_DIR%" >> "%LOG_FILE%"
 if errorlevel 1 (
     echo.
     echo Vue GUI failed to start. Install dependencies with:
-    echo "%PYTHON_EXE%" -m pip install -r "%SCRIPT_DIR%requirements.txt"
+    echo "%PYTHON_EXE%" -m pip install -r "%SCRIPT_DIR%photo_splitter\requirements.txt"
     echo.
     echo If web_ui was changed, rebuild it with:
-    echo cd /d "%SCRIPT_DIR%web_ui" ^&^& npm install ^&^& npm run build
+    echo cd /d "%SCRIPT_DIR%photo_splitter\web_ui" ^&^& npm install ^&^& npm run build
     echo.
     echo Startup log:
     type "%LOG_FILE%"

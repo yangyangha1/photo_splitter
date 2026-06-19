@@ -175,11 +175,15 @@
         </div>
       </div>
     </div>
+
+    <div class="window-resize-zones" aria-hidden="true">
+      <i v-for="edge in resizeEdges" :key="edge" :class="['window-resize-handle', edge]" :data-edge="edge" @pointerdown="startWindowResize" />
+    </div>
   </main>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import IntroContent from "./components/IntroContent.vue";
 import LogBox from "./components/LogBox.vue";
 import PanelTitle from "./components/PanelTitle.vue";
@@ -189,7 +193,23 @@ import PreviewPane from "./components/PreviewPane.vue";
 import StatBox from "./components/StatBox.vue";
 
 const tab = ref("batch");
-const config = reactive({ presets: [], background_modes: [], default_preset: "balanced" });
+const config = reactive({
+  presets: [
+    { key: "balanced", name: "通用平衡", dark_threshold: 70, min_area_ratio: 0.002, white_threshold: 225, background_mode: "auto", skew_gain_percent: 4 },
+    { key: "white_scan", name: "白底扫描件", dark_threshold: 68, min_area_ratio: 0.0016, white_threshold: 218, background_mode: "white", skew_gain_percent: 4 },
+    { key: "dark_frame", name: "黑框/暗边相册", dark_threshold: 58, min_area_ratio: 0.0025, white_threshold: 240, background_mode: "black", skew_gain_percent: 5 },
+    { key: "aggressive", name: "积极分割", dark_threshold: 78, min_area_ratio: 0.0012, white_threshold: 212, background_mode: "auto", skew_gain_percent: 3 },
+    { key: "conservative", name: "保守分割", dark_threshold: 62, min_area_ratio: 0.0035, white_threshold: 235, background_mode: "auto", skew_gain_percent: 7 },
+  ],
+  background_modes: [
+    { key: "auto", label: "自动判断" },
+    { key: "white", label: "白色/浅色底色" },
+    { key: "gray", label: "灰色/杂色底色" },
+    { key: "black", label: "黑色/深色底色" },
+  ],
+  default_preset: "balanced",
+  jpeg_quality: 95,
+});
 const runtime = ref(null);
 const modal = ref(null);
 
@@ -242,6 +262,8 @@ const singleZoom = ref(1);
 const stage = reactive({ width: 1, height: 1, fitScale: 1 });
 const drag = ref(null);
 const handles = ["nw", "ne", "sw", "se", "n", "s", "w", "e"];
+const resizeEdges = ["n", "s", "w", "e", "nw", "ne", "sw", "se"];
+const windowResize = ref(null);
 
 const batchProgressPercent = computed(() => {
   if (!batch.items.length) return 0;
@@ -316,6 +338,90 @@ async function closeWindow() {
   await pywebviewApi()?.close();
 }
 
+async function choosePath(kind, title) {
+  const bridge = pywebviewApi();
+  if (bridge?.select_path) {
+    const selected = await bridge.select_path(kind, title);
+    return selected || "";
+  }
+  const data = await api("/api/dialog", { kind, title });
+  return data.path || "";
+}
+
+async function startWindowResize(event) {
+  const bridge = pywebviewApi();
+  const edge = event.currentTarget?.dataset?.edge;
+  if (!bridge?.bounds || !bridge?.resize_window || !edge) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  const bounds = await bridge.bounds();
+  if (bounds.maximized) return;
+  windowResize.value = {
+    edge,
+    startX: event.screenX,
+    startY: event.screenY,
+    bounds,
+    busy: false,
+    pending: null,
+  };
+  window.addEventListener("pointermove", onWindowResizeMove);
+  window.addEventListener("pointerup", stopWindowResize, { once: true });
+  window.addEventListener("pointercancel", stopWindowResize, { once: true });
+}
+
+function onWindowResizeMove(event) {
+  const state = windowResize.value;
+  if (!state) return;
+  state.pending = { x: event.screenX, y: event.screenY };
+  if (state.busy) return;
+  state.busy = true;
+  window.requestAnimationFrame(applyWindowResize);
+}
+
+async function applyWindowResize() {
+  const state = windowResize.value;
+  if (!state?.pending) return;
+  const point = state.pending;
+  state.pending = null;
+  const dx = point.x - state.startX;
+  const dy = point.y - state.startY;
+  const minWidth = 1400;
+  const minHeight = 920;
+  let x = state.bounds.x;
+  let y = state.bounds.y;
+  let width = state.bounds.width;
+  let height = state.bounds.height;
+
+  if (state.edge.includes("e")) width = Math.max(minWidth, state.bounds.width + dx);
+  if (state.edge.includes("s")) height = Math.max(minHeight, state.bounds.height + dy);
+  if (state.edge.includes("w")) {
+    width = Math.max(minWidth, state.bounds.width - dx);
+    x = state.bounds.x + (state.bounds.width - width);
+  }
+  if (state.edge.includes("n")) {
+    height = Math.max(minHeight, state.bounds.height - dy);
+    y = state.bounds.y + (state.bounds.height - height);
+  }
+
+  try {
+    await pywebviewApi()?.resize_window({ x, y, width, height });
+  } finally {
+    if (windowResize.value) {
+      windowResize.value.busy = false;
+      if (windowResize.value.pending) {
+        window.requestAnimationFrame(applyWindowResize);
+      }
+    }
+  }
+}
+
+function stopWindowResize() {
+  windowResize.value = null;
+  window.removeEventListener("pointermove", onWindowResizeMove);
+  window.removeEventListener("pointercancel", stopWindowResize);
+}
+
 function showModal(kind, title, message, path = "") {
   modal.value = { kind, title, message, path };
 }
@@ -377,19 +483,19 @@ function queueTone(status) {
 
 async function pickDirectory(target) {
   try {
-    const data = await api("/api/dialog", { kind: "directory", title: "选择目录" });
-    if (!data.path) return;
+    const path = await choosePath("directory", "选择目录");
+    if (!path) return;
     if (target === "batchInput") {
-      batch.inputDir = data.path;
-      batch.outputDir ||= `${data.path}\\split_result`;
-      pushLog(batch.logs, `选择输入目录：${data.path}`);
+      batch.inputDir = path;
+      batch.outputDir ||= `${path}\\split_result`;
+      pushLog(batch.logs, `选择输入目录：${path}`);
       await scanBatch();
     } else if (target === "batchOutput") {
-      batch.outputDir = data.path;
-      pushLog(batch.logs, `选择输出目录：${data.path}`);
+      batch.outputDir = path;
+      pushLog(batch.logs, `选择输出目录：${path}`);
     } else {
-      single.outputDir = data.path;
-      pushLog(single.logs, `选择输出目录：${data.path}`);
+      single.outputDir = path;
+      pushLog(single.logs, `选择输出目录：${path}`);
     }
   } catch (error) {
     showError(error);
@@ -398,12 +504,12 @@ async function pickDirectory(target) {
 
 async function pickFile() {
   try {
-    const data = await api("/api/dialog", { kind: "file", title: "选择单张照片" });
-    if (!data.path) return;
-    single.source = data.path;
-    single.outputDir ||= data.path.replace(/\\[^\\]+$/, "\\split_result");
-    pushLog(single.logs, `选择单张照片：${data.path}`);
-    await loadSinglePreview(data.path);
+    const path = await choosePath("file", "选择单张照片");
+    if (!path) return;
+    single.source = path;
+    single.outputDir ||= path.replace(/\\[^\\]+$/, "\\split_result");
+    pushLog(single.logs, `选择单张照片：${path}`);
+    await loadSinglePreview(path);
   } catch (error) {
     showError(error);
   }
@@ -678,18 +784,39 @@ async function exportSingle() {
 }
 
 onMounted(async () => {
-  const [cfg, rt] = await Promise.all([api("/api/config"), api("/api/runtime")]);
-  Object.assign(config, cfg);
-  runtime.value = rt.runtime;
-  batch.options.preset = cfg.default_preset;
-  single.options.preset = cfg.default_preset;
   applyPreset(batch.options);
   applyPreset(single.options);
-  const runtimeLine = runtimeSummary(runtime.value);
-  pushLog(batch.logs, runtimeLine);
-  pushLog(batch.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
-  pushLog(single.logs, runtimeLine);
-  pushLog(single.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
   window.addEventListener("resize", measureImage);
+
+  try {
+    const cfg = await api("/api/config");
+    Object.assign(config, cfg);
+    batch.options.preset = cfg.default_preset;
+    single.options.preset = cfg.default_preset;
+    applyPreset(batch.options);
+    applyPreset(single.options);
+    pushLog(batch.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
+    pushLog(single.logs, `JPEG 保存质量：${cfg.jpeg_quality}。`);
+  } catch (error) {
+    pushLog(batch.logs, `配置读取失败：${error.message || error}`);
+    pushLog(single.logs, `配置读取失败：${error.message || error}`);
+  }
+
+  try {
+    const rt = await api("/api/runtime");
+    runtime.value = rt.runtime;
+    const runtimeLine = runtimeSummary(runtime.value);
+    pushLog(batch.logs, runtimeLine);
+    pushLog(single.logs, runtimeLine);
+  } catch (error) {
+    pushLog(batch.logs, `系统检测失败：${error.message || error}`);
+    pushLog(single.logs, `系统检测失败：${error.message || error}`);
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("resize", measureImage);
+  window.removeEventListener("pointermove", onWindowResizeMove);
+  window.removeEventListener("pointercancel", stopWindowResize);
 });
 </script>

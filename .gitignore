@@ -5,8 +5,8 @@ __pycache__/
 .venv/
 venv/
 env/
-web_ui/node_modules/
-web_ui/.vite/
+photo_splitter/web_ui/node_modules/
+photo_splitter/web_ui/.vite/
 
 build/
 dist/
@@ -17,6 +17,7 @@ split_result/
 outputs/
 输出/
 老照片扫描源文件/
+gui_startup.log
 *.wps
 *.log
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import socket
@@ -109,19 +110,19 @@ def trim_preview_cache(limit: int = 60) -> None:
 
 @app.get("/photo_splitter_icon_preview.png")
 def app_icon_preview():
-    return send_file(resource_path("assets/photo_splitter_icon_preview.png"), mimetype="image/png")
+    return send_file(resource_path("photo_splitter/assets/photo_splitter_icon_preview.png"), mimetype="image/png")
 
 
 @app.get("/favicon.ico")
 def app_favicon():
-    return send_file(resource_path("assets/photo_splitter_icon.ico"), mimetype="image/x-icon")
+    return send_file(resource_path("photo_splitter/assets/photo_splitter_icon.ico"), mimetype="image/x-icon")
 
 
 @app.get("/")
 def index():
     index_path = WEB_STATIC / "index.html"
     if not index_path.exists():
-        return "Vue UI has not been built. Run: cd web_ui && npm install && npm run build", 500
+        return "Vue UI has not been built. Run: cd photo_splitter\\web_ui && npm install && npm run build", 500
     return send_from_directory(WEB_STATIC, "index.html")
 
 
@@ -151,8 +152,8 @@ def api_runtime():
 
 
 def open_dialog(kind: str, title: str) -> str:
-    import tkinter as tk
-    from tkinter import filedialog
+    tk = importlib.import_module("tkinter")
+    filedialog = importlib.import_module("tkinter.filedialog")
 
     root = tk.Tk()
     root.withdraw()
@@ -528,6 +529,43 @@ class WindowControlsApi:
             self.window.maximize()
             self.maximized = True
         return self.maximized
+
+    def bounds(self) -> dict[str, int | bool]:
+        """返回当前窗口边界，供无边框窗口模拟 Windows 拖边缩放使用。"""
+        if not self.window:
+            return {"x": 0, "y": 0, "width": 1560, "height": 1020, "maximized": False}
+        return {
+            "x": int(self.window.x),
+            "y": int(self.window.y),
+            "width": int(self.window.width),
+            "height": int(self.window.height),
+            "maximized": self.maximized,
+        }
+
+    def resize_window(self, payload: dict[str, Any]) -> dict[str, int | bool]:
+        """按前端计算结果移动/缩放窗口，保留 1400x920 的最小尺寸限制。"""
+        if not self.window or self.maximized:
+            return self.bounds()
+        width = max(1400, int(payload.get("width", self.window.width)))
+        height = max(920, int(payload.get("height", self.window.height)))
+        x = int(payload.get("x", self.window.x))
+        y = int(payload.get("y", self.window.y))
+        self.window.move(x, y)
+        self.window.resize(width, height)
+        return self.bounds()
+
+    def select_path(self, kind: str = "directory", title: str = "") -> str:
+        """优先使用 pywebview 原生对话框，减少 EXE 对 tkinter/Tcl 的依赖。"""
+        if not self.window:
+            return ""
+        import webview
+
+        dialog_type = webview.FileDialog.FOLDER if kind == "directory" else webview.FileDialog.OPEN
+        file_types = ("图片文件 (*.jpg;*.jpeg;*.tif;*.tiff)", "所有文件 (*.*)") if kind == "file" else ()
+        selected = self.window.create_file_dialog(dialog_type=dialog_type, allow_multiple=False, file_types=file_types)
+        if not selected:
+            return ""
+        return str(selected[0])
 
     def close(self) -> None:
         if self.window:

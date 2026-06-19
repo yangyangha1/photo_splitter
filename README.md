@@ -68,7 +68,7 @@ python -m photo_splitter.cli 测试照片 -o 输出 --preset balanced --backgrou
 如果只需要更小依赖集合，可以使用：
 
 ```bat
-pip install -r requirements-no-opencv.txt
+pip install -r photo_splitter\requirements-no-opencv.txt
 ```
 
 无 OpenCV 环境会自动降级到 NumPy/Pillow 后备路径。轻量版可以打开界面、读取图片、做基础预处理和部分分割，但边缘检测、轮廓分析、人脸自动旋转和复杂拼图识别能力弱于 OpenCV 版。
@@ -87,11 +87,13 @@ photo_splitter/
   visualization.py    预览框绘制
   cli.py              命令行入口
   web_app.py          Vue 桌面 UI 的 Flask/pywebview 后端
+  assets/             程序实际使用的图标和预览图
+  icon_source/        原始图标源文件备份
+  web_ui/             Vue 前端源码
   web_static/         Vue 编译后的静态文件
-
-web_ui/
-  src/                Vue 前端源码
-  package.json        Vite 构建配置
+  build_demo_versioned.ps1
+  requirements.txt
+  requirements-no-opencv.txt
 ```
 
 ## Vue UI 开发
@@ -99,40 +101,40 @@ web_ui/
 首次安装依赖并编译：
 
 ```bat
-cd web_ui
+cd photo_splitter\web_ui
 npm install
 npm run build
-cd ..
+cd ..\..
 ```
 
 开发调试时先启动 Python 后端，再启动 Vite：
 
 ```bat
 python -m photo_splitter.web_app
-cd web_ui
+cd photo_splitter\web_ui
 npm run dev
 ```
 
 ## 打包 Demo EXE
 
-已使用 `图标/` 文件夹里的最新版图标同步生成 `assets/photo_splitter_icon.ico`，并保留透明底、多尺寸图层和右下角下载箭头。当前 demo 使用单文件打包，默认保留 OpenCV 以支持 OpenCL 加速和人脸方向检测，排除 CuPy/Torch 等大体积可选库。
+已使用 `photo_splitter/icon_source/` 文件夹里的最新版图标同步生成 `photo_splitter/assets/photo_splitter_icon.ico`，并保留透明底、多尺寸图层和右下角下载箭头。当前 demo 使用单文件打包，默认保留 OpenCV 以支持 OpenCL 加速和人脸方向检测，排除 CuPy/Torch、tkinter/Tcl 和其它不用的 GUI 后端等大体积可选库。
 
 重新打包使用版本化脚本，脚本会自动编译 Vue，并生成递增文件名。默认生成带 OpenCV 版本：
 
 ```bat
-powershell -ExecutionPolicy Bypass -File build_demo_versioned.ps1
+powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1
 ```
 
 生成无 OpenCV 轻量版本：
 
 ```bat
-powershell -ExecutionPolicy Bypass -File build_demo_versioned.ps1 -Variant no-opencv
+powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1 -Variant no-opencv
 ```
 
 一次生成带 OpenCV 和无 OpenCV 两个版本：
 
 ```bat
-powershell -ExecutionPolicy Bypass -File build_demo_versioned.ps1 -Variant all
+powershell -ExecutionPolicy Bypass -File photo_splitter\build_demo_versioned.ps1 -Variant all
 ```
 
 生成文件位于：
@@ -146,11 +148,12 @@ dist/photo_splitter_demo_v7_no_opencv.exe
 
 ## GitHub 发布
 
-当前仓库已整理为源代码、Vue 前端、图标资源和构建脚本为主的提交范围；测试照片、输出目录、归档目录、`dist/` 和 `build/` 默认不进入 Git。
+当前仓库已整理为源代码集中在 `photo_splitter/` 内、根目录只保留启动 bat、README 和测试/归档/输出等本地目录的结构；测试照片、输出目录、归档目录、`dist/` 和 `build/` 默认不进入 Git。
 
-本机如果安装并登录 GitHub CLI，可以执行：
+首次发布推荐流程：
 
 ```bat
+winget install --id GitHub.cli
 gh auth login
 gh repo create photo_splitter --private --source . --remote origin --push
 ```

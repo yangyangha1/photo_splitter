@@ -5,15 +5,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $root
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = Split-Path -Parent $scriptDir
+Set-Location $projectRoot
 
-Push-Location (Join-Path $root "web_ui")
+Push-Location (Join-Path $scriptDir "web_ui")
 npm install
 npm run build
 Pop-Location
 
-$dist = Join-Path $root "dist"
+$dist = Join-Path $projectRoot "dist"
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
 $maxVersion = 0
@@ -37,25 +38,39 @@ foreach ($item in $variants) {
         --windowed `
         --onefile `
         --name $appName `
-        --icon "assets\photo_splitter_icon.ico" `
-        --add-data "assets\photo_splitter_icon.ico;assets" `
-        --add-data "assets\photo_splitter_icon_preview.png;assets" `
+        --icon "photo_splitter\assets\photo_splitter_icon.ico" `
+        --add-data "photo_splitter\assets\photo_splitter_icon.ico;photo_splitter\assets" `
+        --add-data "photo_splitter\assets\photo_splitter_icon_preview.png;photo_splitter\assets" `
         --add-data "photo_splitter\web_static;photo_splitter\web_static" `
         @opencvArgs `
         --hidden-import flask `
         --hidden-import webview `
+        --exclude-module tkinter `
+        --exclude-module _tkinter `
+        --exclude-module tcl `
+        --exclude-module tk `
+        --exclude-module cryptography `
+        --exclude-module OpenSSL `
+        --exclude-module setuptools `
+        --exclude-module pkg_resources `
+        --exclude-module wheel `
         --exclude-module cupy `
         --exclude-module torch `
         --exclude-module matplotlib `
         --exclude-module pandas `
         --exclude-module scipy `
         --exclude-module skimage `
+        --exclude-module PyQt5 `
+        --exclude-module PyQt6 `
+        --exclude-module PySide2 `
+        --exclude-module PySide6 `
+        --exclude-module gi `
         --exclude-module IPython `
         --exclude-module pytest `
         --exclude-module yaml `
         "photo_splitter\web_app.py"
 
-    $generatedSpec = Join-Path $root "$appName.spec"
+    $generatedSpec = Join-Path $projectRoot "$appName.spec"
     if (Test-Path -LiteralPath $generatedSpec) {
         Remove-Item -LiteralPath $generatedSpec -Force
     }

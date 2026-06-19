@@ -13,7 +13,7 @@ if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
 if errorlevel 1 (
     echo.
     echo Split failed. Install dependencies with:
-    echo "%PYTHON_EXE%" -m pip install -r "%SCRIPT_DIR%requirements.txt"
+    echo "%PYTHON_EXE%" -m pip install -r "%SCRIPT_DIR%photo_splitter\requirements.txt"
     pause
     exit /b 1
 )

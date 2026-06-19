@@ -5,7 +5,7 @@ import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   plugins: [vue()],
   build: {
-    outDir: fileURLToPath(new URL("../photo_splitter/web_static", import.meta.url)),
+    outDir: fileURLToPath(new URL("../web_static", import.meta.url)),
     emptyOutDir: true,
   },
   server: {
