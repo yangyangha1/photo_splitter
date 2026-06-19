@@ -514,6 +514,15 @@ function logParameterChange(logs, event) {
   pushLog(logs, `参数调整：${event.name} -> ${event.value}`);
 }
 
+function escapeLogHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function applyPreset(options) {
   const preset = config.presets.find((item) => item.key === options.preset) || config.presets[0];
   if (!preset) return;
@@ -533,10 +542,12 @@ function runtimeSummary(info) {
     "opencv-cpu": "OpenCV CPU",
     "numpy-cpu": "NumPy CPU",
   };
-  const gpu = info.gpu_name ? `检测到 GPU：${info.gpu_name}` : "未检测到独立 GPU";
+  const cpu = info.cpu_name || `${info.cpu_count || 0} 线程 CPU`;
+  const gpu = info.gpu_name || "未检测到独立 GPU";
   const backend = backendNames[info.compute_backend] || info.compute_backend;
-  const note = info.acceleration_note ? `；${info.acceleration_note}` : "";
-  return `系统检测：${gpu}；当前使用算力：${backend}${note}`;
+  return {
+    html: `检测到CPU：${escapeLogHtml(cpu)}；GPU：${escapeLogHtml(gpu)}；<br>当前使用算力：<b>${escapeLogHtml(backend)}</b>。`,
+  };
 }
 
 function queueTone(status) {
