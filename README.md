@@ -2,6 +2,11 @@
 
 用于把扫描件、相册拼版、多张照片同页图片自动分割为独立 JPG。当前版本已拆分为 `photo_splitter/` 模块，主界面已重构为 Vue 桌面 UI，并提供批量处理和单独处理两个页面。
 
+## 运行
+
+- 确认具有python3.13以上版本和requirements列出依赖的环境，运行run_gui.bat
+- 使用releases中编译的程序
+- 如果运行失败，寻求CODEX帮助
 
 ## 功能
 
@@ -94,6 +99,10 @@ cd photo_splitter\web_ui
 npm run dev
 ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 43ee25b (Simplify ignore rules and remove CLI bat)
 
 ## 开发署名
 
