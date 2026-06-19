@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -65,7 +64,6 @@ def main() -> int:
 
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
     output_path.mkdir(parents=True, exist_ok=True)
-    report: dict[str, object] = {"processed": [], "failed": [], "options": options}
 
     if args.runtime_info:
         runtime = detect_runtime_environment()
@@ -114,20 +112,10 @@ def main() -> int:
             detected = int(result["detected"])
             total_saved += detected
             print(f"{result['source']}: saved {detected}")
-            report["processed"].append(
-                {
-                    "source": result["source"],
-                    "detected": detected,
-                    "outputs": result["outputs"],
-                }
-            )
         else:
             print(f"{result['source']}: failed: {result['error']}")
-            report["failed"].append({"source": result["source"], "error": result["error"]})
 
-    report_path = output_path / "split_report.json"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Done. Saved {total_saved} photos. Report: {report_path}")
+    print(f"Done. Saved {total_saved} photos.")
     return 0
 
 

@@ -111,8 +111,14 @@
       >
         <IntroContent v-if="!single.imageUrl" mode="single" />
         <div v-else class="single-preview-content">
-          <div ref="stageRef" class="image-stage" :class="{ zoomed: singleZoom > 1.01 }" @wheel.prevent="zoomSinglePreview" @pointerdown.self="selectedBox = null">
-            <div class="image-layer" :style="imageLayerStyle" @pointerdown.self="selectedBox = null">
+          <div
+            ref="stageRef"
+            class="image-stage"
+            :class="{ zoomed: singleZoom > 1.01, panning: previewPan }"
+            @wheel.prevent="zoomSinglePreview"
+            @pointerdown="startPreviewPan"
+          >
+            <div class="image-layer" :style="imageLayerStyle">
               <img ref="imageRef" :src="single.imageUrl" @load="measureImage" />
               <div
                 v-for="(box, index) in displayBoxes"
@@ -262,6 +268,7 @@ const imageRef = ref(null);
 const singleZoom = ref(1);
 const stage = reactive({ width: 1, height: 1, fitScale: 1 });
 const drag = ref(null);
+const previewPan = ref(null);
 const handles = ["nw", "ne", "sw", "se", "n", "s", "w", "e"];
 const resizeEdges = ["n", "s", "w", "e", "nw", "ne", "sw", "se"];
 const windowResize = ref(null);
@@ -680,6 +687,46 @@ async function zoomSinglePreview(event) {
   wrap.scrollTop = (wrap.scrollTop + offsetY) * scaleRatio - offsetY;
 }
 
+function startPreviewPan(event) {
+  if (!single.imageUrl) return;
+  if (singleZoom.value <= 1.01) {
+    selectedBox.value = null;
+    return;
+  }
+  if (event.button !== undefined && event.button !== 0) return;
+  if (event.target.closest?.(".box, .handle")) return;
+  const wrap = stageRef.value;
+  if (!wrap) return;
+  selectedBox.value = null;
+  const canPan = wrap.scrollWidth > wrap.clientWidth + 2 || wrap.scrollHeight > wrap.clientHeight + 2;
+  if (!canPan) return;
+  event.preventDefault();
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  previewPan.value = {
+    startX: event.clientX,
+    startY: event.clientY,
+    scrollLeft: wrap.scrollLeft,
+    scrollTop: wrap.scrollTop,
+  };
+  window.addEventListener("pointermove", onPreviewPan);
+  window.addEventListener("pointerup", stopPreviewPan, { once: true });
+  window.addEventListener("pointercancel", stopPreviewPan, { once: true });
+}
+
+function onPreviewPan(event) {
+  const state = previewPan.value;
+  const wrap = stageRef.value;
+  if (!state || !wrap) return;
+  wrap.scrollLeft = state.scrollLeft - (event.clientX - state.startX);
+  wrap.scrollTop = state.scrollTop - (event.clientY - state.startY);
+}
+
+function stopPreviewPan() {
+  previewPan.value = null;
+  window.removeEventListener("pointermove", onPreviewPan);
+  window.removeEventListener("pointercancel", stopPreviewPan);
+}
+
 function pushUndo() {
   single.undo.push(single.boxes.map((box) => [...box]));
   if (single.undo.length > 30) single.undo.shift();
@@ -817,6 +864,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", measureImage);
+  window.removeEventListener("pointermove", onPreviewPan);
+  window.removeEventListener("pointercancel", stopPreviewPan);
   window.removeEventListener("pointermove", onWindowResizeMove);
   window.removeEventListener("pointercancel", stopWindowResize);
 });

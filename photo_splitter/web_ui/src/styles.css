@@ -856,7 +856,12 @@ input[type="range"] {
 .image-stage.zoomed {
   align-items: flex-start;
   justify-content: flex-start;
-  cursor: zoom-out;
+  cursor: grab;
+}
+
+.image-stage.panning,
+.image-stage.panning * {
+  cursor: grabbing;
 }
 
 .image-layer {

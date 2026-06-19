@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import io
-import json
 import socket
 import sys
 import tempfile
@@ -260,7 +259,6 @@ def api_batch_start():
     def worker() -> None:
         from photo_splitter.processing import save_split_photos
 
-        report: dict[str, Any] = {"processed": [], "failed": [], "options": {**options, "quality": JPEG_QUALITY, "save_preview": True}}
         output_path.mkdir(parents=True, exist_ok=True)
         # 后台线程只更新 JOBS 里的轻量状态，前端轮询后显示进度并保持日志可滚动查看。
         for index, source in enumerate(images, start=1):
@@ -288,18 +286,13 @@ def api_batch_start():
                 job["items"][index - 1]["status"] = "已完成"
                 job["items"][index - 1]["saved"] = len(saved)
                 job["logs"].append(f"完成：{source.name}，输出 {len(saved)} 张。")
-                report["processed"].append({"source": str(source), "saved": len(saved), "outputs": [str(path) for path in saved]})
             except Exception as exc:
                 error = str(exc)
                 job["items"][index - 1]["status"] = "失败"
                 job["failed"].append({"source": str(source), "error": error})
                 job["logs"].append(f"失败：{source.name}，{error}")
-                report["failed"].append({"source": str(source), "error": error})
-        report_path = output_path / "split_report.json"
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         job = JOBS[job_id]
         job["status"] = "done"
-        job["report"] = str(report_path)
         job["logs"].append(f"批量处理完成，输出 {job['saved']} 张。")
 
     threading.Thread(target=worker, daemon=True).start()
@@ -440,22 +433,12 @@ def api_single_export():
         draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
     preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
     preview.save(preview_path, "JPEG", quality=92)
-    report_path = unique_output_path(output_dir / f"{source_name}_manual_report.json", overwrite=False)
-    report_path.write_text(
-        json.dumps(
-            {"source": item["source"], "outputs": [str(path) for path in saved], "preview": str(preview_path), "boxes": boxes, "options": options},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
     return jsonify(
         {
             "ok": True,
             "saved": len(saved),
             "outputs": [str(path) for path in saved],
             "preview": str(preview_path),
-            "report": str(report_path),
             "output_dir": str(output_dir),
         }
     )
