@@ -41,7 +41,7 @@ foreach ($item in $variants) {
         --icon "photo_splitter\assets\photo_splitter_icon.ico" `
         --add-data "photo_splitter\assets\photo_splitter_icon.ico;photo_splitter\assets" `
         --add-data "photo_splitter\assets\photo_splitter_icon_preview.png;photo_splitter\assets" `
-        --add-data "photo_splitter\web_static;photo_splitter\web_static" `
+        --add-data "photo_splitter\web_ui\dist;photo_splitter\web_ui\dist" `
         @opencvArgs `
         --hidden-import flask `
         --hidden-import webview `

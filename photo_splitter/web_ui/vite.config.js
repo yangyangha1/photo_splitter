@@ -5,12 +5,14 @@ import { fileURLToPath, URL } from "node:url";
 export default defineConfig({
   plugins: [vue()],
   build: {
-    outDir: fileURLToPath(new URL("../web_static", import.meta.url)),
+    outDir: fileURLToPath(new URL("dist", import.meta.url)),
     emptyOutDir: true,
   },
   server: {
     proxy: {
       "/api": "http://127.0.0.1:8765",
+      "/favicon.ico": "http://127.0.0.1:8765",
+      "/photo_splitter_icon_preview.png": "http://127.0.0.1:8765",
     },
   },
 });

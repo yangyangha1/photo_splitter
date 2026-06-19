@@ -2,7 +2,7 @@
   <main class="app-shell">
     <header class="topbar" @dblclick="handleTopbarDoubleClick">
       <div class="brand window-drag">
-        <img src="/photo_splitter_icon_preview.png" alt="" />
+        <img :src="appIconUrl" alt="" />
         <strong>照片分割器</strong>
       </div>
       <div class="topbar-center">
@@ -192,6 +192,7 @@ import PathPicker from "./components/PathPicker.vue";
 import PreviewPane from "./components/PreviewPane.vue";
 import StatBox from "./components/StatBox.vue";
 
+const appIconUrl = "/photo_splitter_icon_preview.png";
 const tab = ref("batch");
 const config = reactive({
   presets: [

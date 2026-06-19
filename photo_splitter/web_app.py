@@ -16,6 +16,7 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
+from werkzeug.serving import make_server
 
 from photo_splitter.config import BACKGROUND_MODES, DEFAULT_BACKGROUND_MODE, DEFAULT_PRESET_KEY, JPEG_QUALITY, PROCESSING_PRESETS
 
@@ -27,6 +28,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 JOBS: dict[str, dict[str, Any]] = {}
 SINGLE_CACHE: dict[str, dict[str, Any]] = {}
 PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
+WEBVIEW_WINDOW: Any | None = None
+WEBVIEW_WINDOW_MAXIMIZED = False
 
 
 def resource_path(relative_path: str) -> Path:
@@ -34,7 +37,7 @@ def resource_path(relative_path: str) -> Path:
     return bundle_root / relative_path
 
 
-WEB_STATIC = resource_path("photo_splitter/web_static")
+WEB_STATIC = resource_path("photo_splitter/web_ui/dist")
 app = Flask(__name__, static_folder=str(WEB_STATIC), static_url_path="")
 
 
@@ -489,115 +492,114 @@ def find_available_port(start: int = 8765, attempts: int = 20) -> int:
     raise RuntimeError("没有可用的本地端口。")
 
 
-def wait_for_server(url: str, timeout: float = 8.0) -> None:
+def wait_for_server(url: str, timeout: float = 45.0) -> None:
+    """等待 Flask 本地服务可用。
+
+    PyInstaller onefile 首次启动需要解压和导入依赖，低配机器或杀毒扫描时
+    8 秒很容易误判失败，因此这里给桌面版保留更宽裕的启动窗口。
+    """
     deadline = time.time() + timeout
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
-            with urlopen(f"{url}/api/config", timeout=0.5) as response:
+            with urlopen(f"{url}/api/config", timeout=1.0) as response:
                 if response.status == 200:
                     return
         except Exception as exc:
             last_error = exc
-            time.sleep(0.15)
+            time.sleep(0.25)
     if last_error:
         raise RuntimeError(f"本地服务启动超时：{last_error}") from last_error
     raise RuntimeError("本地服务启动超时。")
 
 
+def bind_webview_window(window: Any) -> None:
+    """缓存 pywebview 窗口对象。
+
+    不要把 window 挂到 js_api 实例上。pywebview 会反射 js_api 对象，
+    复杂窗口对象会让 Edge WebView2 宿主卡住，表现为界面渲染但窗口无响应。
+    """
+    global WEBVIEW_WINDOW, WEBVIEW_WINDOW_MAXIMIZED
+
+    WEBVIEW_WINDOW = window
+    WEBVIEW_WINDOW_MAXIMIZED = False
+
+
 class WindowControlsApi:
-    """暴露给 Vue 的窗口控制 API，用于无系统标题栏后的最小化、最大化和关闭。"""
-
-    def __init__(self) -> None:
-        self.window: Any | None = None
-        self.maximized = False
-
-    def bind(self, window: Any) -> None:
-        self.window = window
+    """暴露给 Vue 的轻量窗口控制 API。"""
 
     def minimize(self) -> None:
-        if self.window:
-            self.window.minimize()
+        if WEBVIEW_WINDOW:
+            WEBVIEW_WINDOW.minimize()
 
     def toggle_maximize(self) -> bool:
-        if not self.window:
+        global WEBVIEW_WINDOW_MAXIMIZED
+
+        if not WEBVIEW_WINDOW:
             return False
-        if self.maximized:
-            self.window.restore()
-            self.maximized = False
+        if WEBVIEW_WINDOW_MAXIMIZED:
+            WEBVIEW_WINDOW.restore()
+            WEBVIEW_WINDOW_MAXIMIZED = False
         else:
-            self.window.maximize()
-            self.maximized = True
-        return self.maximized
+            WEBVIEW_WINDOW.maximize()
+            WEBVIEW_WINDOW_MAXIMIZED = True
+        return WEBVIEW_WINDOW_MAXIMIZED
 
     def bounds(self) -> dict[str, int | bool]:
         """返回当前窗口边界，供无边框窗口模拟 Windows 拖边缩放使用。"""
-        if not self.window:
+        if not WEBVIEW_WINDOW:
             return {"x": 0, "y": 0, "width": 1560, "height": 1020, "maximized": False}
         return {
-            "x": int(self.window.x),
-            "y": int(self.window.y),
-            "width": int(self.window.width),
-            "height": int(self.window.height),
-            "maximized": self.maximized,
+            "x": int(WEBVIEW_WINDOW.x),
+            "y": int(WEBVIEW_WINDOW.y),
+            "width": int(WEBVIEW_WINDOW.width),
+            "height": int(WEBVIEW_WINDOW.height),
+            "maximized": WEBVIEW_WINDOW_MAXIMIZED,
         }
 
     def resize_window(self, payload: dict[str, Any]) -> dict[str, int | bool]:
-        """按前端计算结果移动/缩放窗口，保留 1400x920 的最小尺寸限制。"""
-        if not self.window or self.maximized:
+        """按前端计算结果移动/缩放无边框窗口，保留最小尺寸限制。"""
+        if not WEBVIEW_WINDOW or WEBVIEW_WINDOW_MAXIMIZED:
             return self.bounds()
-        width = max(1400, int(payload.get("width", self.window.width)))
-        height = max(920, int(payload.get("height", self.window.height)))
-        x = int(payload.get("x", self.window.x))
-        y = int(payload.get("y", self.window.y))
-        self.window.move(x, y)
-        self.window.resize(width, height)
+        width = max(1400, int(payload.get("width", WEBVIEW_WINDOW.width)))
+        height = max(920, int(payload.get("height", WEBVIEW_WINDOW.height)))
+        x = int(payload.get("x", WEBVIEW_WINDOW.x))
+        y = int(payload.get("y", WEBVIEW_WINDOW.y))
+        WEBVIEW_WINDOW.move(x, y)
+        WEBVIEW_WINDOW.resize(width, height)
         return self.bounds()
 
     def select_path(self, kind: str = "directory", title: str = "") -> str:
         """优先使用 pywebview 原生对话框，减少 EXE 对 tkinter/Tcl 的依赖。"""
-        if not self.window:
+        if not WEBVIEW_WINDOW:
             return ""
         import webview
 
         dialog_type = webview.FileDialog.FOLDER if kind == "directory" else webview.FileDialog.OPEN
         file_types = ("图片文件 (*.jpg;*.jpeg;*.tif;*.tiff)", "所有文件 (*.*)") if kind == "file" else ()
-        selected = self.window.create_file_dialog(dialog_type=dialog_type, allow_multiple=False, file_types=file_types)
+        selected = WEBVIEW_WINDOW.create_file_dialog(dialog_type=dialog_type, allow_multiple=False, file_types=file_types)
         if not selected:
             return ""
         return str(selected[0])
 
     def close(self) -> None:
-        if self.window:
-            self.window.destroy()
+        if WEBVIEW_WINDOW:
+            WEBVIEW_WINDOW.destroy()
 
 
 def main() -> None:
     set_windows_app_id()
     port = find_available_port()
     url = f"http://127.0.0.1:{port}"
-    server = threading.Thread(
-        target=lambda: app.run(host="127.0.0.1", port=port, debug=False, threaded=True, use_reloader=False),
-        daemon=True,
-    )
+    http_server = make_server("127.0.0.1", port, app, threaded=True)
+    server = threading.Thread(target=http_server.serve_forever, daemon=True)
     server.start()
     wait_for_server(url)
 
-    import_result: dict[str, Any] = {}
-
-    def import_webview() -> None:
-        try:
-            import webview
-
-            import_result["webview"] = webview
-        except Exception as exc:
-            import_result["error"] = exc
-
-    import_thread = threading.Thread(target=import_webview, daemon=True)
-    import_thread.start()
-    import_thread.join(timeout=5)
-    webview = import_result.get("webview")
-    if webview is None:
+    try:
+        # pywebview/WebView2 的窗口初始化必须留在主线程，否则 Windows 下可能只渲染界面但不响应鼠标键盘。
+        import webview
+    except Exception:
         webbrowser.open(url)
         server.join()
         return
@@ -618,8 +620,11 @@ def main() -> None:
         shadow=True,
         background_color="#0d0f14",
     )
-    window_api.bind(window)
-    webview.start()
+    bind_webview_window(window)
+    try:
+        webview.start(gui="edgechromium")
+    finally:
+        http_server.shutdown()
 
 
 if __name__ == "__main__":

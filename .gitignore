@@ -8,8 +8,8 @@ env/
 photo_splitter/web_ui/node_modules/
 photo_splitter/web_ui/.vite/
 
-build/
-dist/
+/build/
+/dist/
 *.spec.bak
 
 split_output/

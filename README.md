@@ -88,9 +88,7 @@ photo_splitter/
   cli.py              命令行入口
   web_app.py          Vue 桌面 UI 的 Flask/pywebview 后端
   assets/             程序实际使用的图标和预览图
-  icon_source/        原始图标源文件备份
-  web_ui/             Vue 前端源码
-  web_static/         Vue 编译后的静态文件
+  web_ui/             Vue 前端源码和 dist 编译产物
   build_demo_versioned.ps1
   requirements.txt
   requirements-no-opencv.txt
@@ -117,7 +115,7 @@ npm run dev
 
 ## 打包 Demo EXE
 
-已使用 `photo_splitter/icon_source/` 文件夹里的最新版图标同步生成 `photo_splitter/assets/photo_splitter_icon.ico`，并保留透明底、多尺寸图层和右下角下载箭头。当前 demo 使用单文件打包，默认保留 OpenCV 以支持 OpenCL 加速和人脸方向检测，排除 CuPy/Torch、tkinter/Tcl 和其它不用的 GUI 后端等大体积可选库。
+当前 demo 使用 `photo_splitter/assets/photo_splitter_icon.ico` 作为 Windows 程序图标，并保留透明底、多尺寸图层和右下角下载箭头。单文件打包默认保留 OpenCV 以支持 OpenCL 加速和人脸方向检测，排除 CuPy/Torch、tkinter/Tcl 和其它不用的 GUI 后端等大体积可选库。
 
 重新打包使用版本化脚本，脚本会自动编译 Vue，并生成递增文件名。默认生成带 OpenCV 版本：
 
