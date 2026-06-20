@@ -18,6 +18,7 @@ outputs/
 gui_startup.log
 *.wps
 *.log
+*.txt
 
 .DS_Store
 Thumbs.db

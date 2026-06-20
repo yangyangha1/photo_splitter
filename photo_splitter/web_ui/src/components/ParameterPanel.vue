@@ -34,14 +34,17 @@
         </div>
       </div>
 
-      <div class="field">
-        <label>人脸判断自动旋转</label>
-        <div class="ios-segment">
-          <button :class="{ active: options.auto_face_rotate === false }" @click="setFaceRotate(false)">
-            关闭
+      <div class="field switch-field">
+        <div class="switch-row">
+          <button class="switch-button" :class="{ active: options.auto_face_rotate }" @click="toggleFaceRotate">
+            <span class="switch-knob"></span>
+            <span>人脸判断自动旋转</span>
+            <b>{{ options.auto_face_rotate ? "开启" : "关闭" }}</b>
           </button>
-          <button :class="{ active: options.auto_face_rotate === true }" @click="setFaceRotate(true)">
-            开启
+          <button class="switch-button" :class="{ active: options.save_split_preview }" @click="toggleSplitPreview">
+            <span class="switch-knob"></span>
+            <span>保存分割预览图</span>
+            <b>{{ options.save_split_preview ? "开启" : "关闭" }}</b>
           </button>
         </div>
       </div>
@@ -113,9 +116,14 @@ function setBackgroundMode(item) {
   emitChange("源图底色", item.label);
 }
 
-function setFaceRotate(value) {
-  props.options.auto_face_rotate = value;
-  emitChange("人脸判断自动旋转", value ? "开启" : "关闭");
+function toggleFaceRotate() {
+  props.options.auto_face_rotate = !props.options.auto_face_rotate;
+  emitChange("人脸判断自动旋转", props.options.auto_face_rotate ? "开启" : "关闭");
+}
+
+function toggleSplitPreview() {
+  props.options.save_split_preview = !props.options.save_split_preview;
+  emitChange("保存分割预览图", props.options.save_split_preview ? "开启" : "关闭");
 }
 
 function emitChange(name, value) {

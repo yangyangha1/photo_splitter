@@ -263,6 +263,7 @@ const defaultOptions = () => ({
   detection_strategy: "balanced",
   split_strategy: "balanced",
   auto_face_rotate: false,
+  save_split_preview: false,
 });
 
 const batch = reactive({

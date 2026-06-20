@@ -226,6 +226,7 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "skew_min_score_gain": 1.0 + int(payload.get("skew_gain_percent", preset.skew_gain_percent)) / 100,
         "skew_gain_percent": int(payload.get("skew_gain_percent", preset.skew_gain_percent)),
         "auto_face_rotate": bool(payload.get("auto_face_rotate", False)),
+        "save_split_preview": bool(payload.get("save_split_preview", False)),
     }
 
 
@@ -567,6 +568,7 @@ def api_batch_export():
     if not items:
         return json_error("没有可导出的检测结果，请先批量检测。")
     options = options_from_payload(payload.get("options") or {})
+    save_split_preview = bool(options.get("save_split_preview", False))
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {
@@ -634,13 +636,14 @@ def api_batch_export():
                     crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
                     crop.close()
                     saved.append(target)
-                preview = image.copy()
-                draw = ImageDraw.Draw(preview)
-                for box_index, box in enumerate(boxes, start=1):
-                    draw_preview_box(draw, tuple(box), f"{box_index:03d}", image.width)
-                preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
-                preview.save(preview_path, "JPEG", quality=92)
-                preview.close()
+                if save_split_preview:
+                    preview = image.copy()
+                    draw = ImageDraw.Draw(preview)
+                    for box_index, box in enumerate(boxes, start=1):
+                        draw_preview_box(draw, tuple(box), f"{box_index:03d}", image.width)
+                    preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
+                    preview.save(preview_path, "JPEG", quality=92)
+                    preview.close()
                 job["saved"] += len(saved)
                 job["items"][index - 1]["status"] = "已完成"
                 job["items"][index - 1]["saved"] = len(saved)
@@ -888,19 +891,21 @@ def api_single_export():
             crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
             crop.close()
             saved.append(target)
-        preview = image.copy()
-        draw = ImageDraw.Draw(preview)
-        for index, box in enumerate(boxes, start=1):
-            draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
-        preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
-        preview.save(preview_path, "JPEG", quality=92)
-        preview.close()
+        preview_path: Path | None = None
+        if bool(options.get("save_split_preview", False)):
+            preview = image.copy()
+            draw = ImageDraw.Draw(preview)
+            for index, box in enumerate(boxes, start=1):
+                draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
+            preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
+            preview.save(preview_path, "JPEG", quality=92)
+            preview.close()
         return jsonify(
             {
                 "ok": True,
                 "saved": len(saved),
                 "outputs": [str(path) for path in saved],
-                "preview": str(preview_path),
+                "preview": str(preview_path) if preview_path else "",
                 "output_dir": str(output_dir),
             }
         )

@@ -5,21 +5,33 @@ chcp 65001 >nul
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-set "PYTHON_EXE=python"
-if exist "%LocalAppData%\Programs\Python\Python313\python.exe" (
-    set "PYTHON_EXE=%LocalAppData%\Programs\Python\Python313\python.exe"
-)
-
 set "LOG_FILE=%SCRIPT_DIR%gui_startup.log"
-set "WEB_UI_DIR=%SCRIPT_DIR%photo_splitter\web_ui"
-echo [%date% %time%] Starting Vue GUI with "%PYTHON_EXE%" > "%LOG_FILE%"
+set "LAUNCHER_DIR=%LocalAppData%\PhotoSplitter\Launcher"
+set "LAUNCHER_EXE=%LAUNCHER_DIR%\PhotoSplitterLauncher.exe"
+set "BUILD_LAUNCHER=%SCRIPT_DIR%photo_splitter\launcher\build_launcher.ps1"
+set "PAYLOAD_SCRIPT=%SCRIPT_DIR%photo_splitter\start_gui_payload.ps1"
+
+echo [%date% %time%] Preparing GUI launcher > "%LOG_FILE%"
 echo Working directory: "%SCRIPT_DIR%" >> "%LOG_FILE%"
 
-where npm >nul 2>&1
+if not exist "%BUILD_LAUNCHER%" (
+    echo Launcher build script was not found: "%BUILD_LAUNCHER%" >> "%LOG_FILE%"
+    type "%LOG_FILE%"
+    pause
+    exit /b 1
+)
+
+if not exist "%PAYLOAD_SCRIPT%" (
+    echo GUI payload script was not found: "%PAYLOAD_SCRIPT%" >> "%LOG_FILE%"
+    type "%LOG_FILE%"
+    pause
+    exit /b 1
+)
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%BUILD_LAUNCHER%" -OutputPath "%LAUNCHER_EXE%" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
     echo.
-    echo Vue UI build failed: npm was not found.
-    echo Please install Node.js first, then run this file again.
+    echo Launcher build failed.
     echo.
     echo Startup log:
     type "%LOG_FILE%"
@@ -27,55 +39,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "%WEB_UI_DIR%\package.json" (
-    echo.
-    echo Vue UI build failed: package.json was not found.
-    echo Expected path: "%WEB_UI_DIR%"
-    echo.
-    pause
-    exit /b 1
-)
-
-echo Building Vue UI before startup... >> "%LOG_FILE%"
-pushd "%WEB_UI_DIR%"
-if not exist "node_modules" (
-    echo Installing Vue UI dependencies... >> "%LOG_FILE%"
-    call npm install >> "%LOG_FILE%" 2>&1
-    if errorlevel 1 (
-        popd
-        echo.
-        echo Vue UI dependency install failed.
-        echo.
-        echo Startup log:
-        type "%LOG_FILE%"
-        pause
-        exit /b 1
-    )
-)
-
-call npm run build >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    popd
-    echo.
-    echo Vue UI build failed.
-    echo.
-    echo Startup log:
-    type "%LOG_FILE%"
-    pause
-    exit /b 1
-)
-popd
-
-echo Vue UI build completed. >> "%LOG_FILE%"
-
-"%PYTHON_EXE%" -m photo_splitter.web_app >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-    echo.
-    echo Vue GUI failed to start. Install dependencies with:
-    echo "%PYTHON_EXE%" -m pip install -r "%SCRIPT_DIR%photo_splitter\requirements.txt"
-    echo.
-    echo Startup log:
-    type "%LOG_FILE%"
-    pause
-    exit /b 1
-)
+set "PHOTO_SPLITTER_WORKDIR=%SCRIPT_DIR%"
+start "" "%LAUNCHER_EXE%" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%PAYLOAD_SCRIPT%"

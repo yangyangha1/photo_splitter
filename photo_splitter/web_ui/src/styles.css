@@ -446,6 +446,10 @@ button:disabled {
   gap: 7px;
 }
 
+.switch-field {
+  margin-top: 2px;
+}
+
 .ios-segment.preset button {
   padding: 0 3px;
   font-size: 11px;
@@ -459,6 +463,93 @@ button:disabled {
 .field .ios-segment:not(.preset) button {
   padding: 0 8px;
   font-size: 11.5px;
+}
+
+.switch-button {
+  min-width: 0;
+  min-height: 38px;
+  border-radius: 999px;
+  border: 1px solid var(--glass-stroke);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.12), rgb(255 255 255 / 0.035)),
+    rgb(21 29 40 / 0.64);
+  color: #cbd7e6;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.11), 0 10px 24px rgb(0 0 0 / 0.2);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.switch-button.active {
+  color: white;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.22), rgb(255 255 255 / 0.04)),
+    linear-gradient(180deg, #55b2ff 0%, var(--blue) 48%, var(--blue-deep) 100%);
+  box-shadow: 0 10px 28px rgb(61 155 255 / 0.3), inset 0 1px 0 rgb(255 255 255 / 0.2);
+}
+
+.switch-button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.switch-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px 0 6px;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.switch-button span:not(.switch-knob) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch-button b {
+  font-size: 12px;
+  color: inherit;
+}
+
+.switch-knob {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.9);
+  box-shadow: 0 5px 14px rgb(0 0 0 / 0.28), inset 0 1px 0 rgb(255 255 255 / 0.9);
+}
+
+.switch-button:not(.active) .switch-knob {
+  background: rgb(174 186 201 / 0.72);
+}
+
+.switch-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.switch-row .switch-button {
+  height: 40px;
+  min-height: 40px;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 7px;
+  padding: 0 9px 0 5px;
+  font-size: 11.5px;
+}
+
+.switch-row .switch-button b {
+  font-size: 11.5px;
+}
+
+.switch-row .switch-knob {
+  width: 26px;
+  height: 26px;
 }
 
 .range label {

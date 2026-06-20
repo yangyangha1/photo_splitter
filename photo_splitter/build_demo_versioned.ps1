@@ -222,6 +222,35 @@ function Invoke-WithOptionalToolPath {
     }
 }
 
+function Wrap-WithStartupLauncher {
+    param([string]$ExePath)
+
+    $launcherScript = Join-Path $scriptDir "launcher\build_launcher.ps1"
+    if (-not (Test-Path -LiteralPath $launcherScript)) {
+        Write-Warning "Launcher build script was not found; keeping raw PyInstaller executable."
+        return
+    }
+
+    $payloadPath = [System.IO.Path]::ChangeExtension($ExePath, ".payload.exe")
+    if (Test-Path -LiteralPath $payloadPath) {
+        Remove-Item -LiteralPath $payloadPath -Force
+    }
+
+    Move-Item -LiteralPath $ExePath -Destination $payloadPath -Force
+    try {
+        & $launcherScript -OutputPath $ExePath -PayloadPath $payloadPath
+    } catch {
+        if (Test-Path -LiteralPath $ExePath) {
+            Remove-Item -LiteralPath $ExePath -Force
+        }
+        Move-Item -LiteralPath $payloadPath -Destination $ExePath -Force
+        throw
+    }
+
+    Remove-Item -LiteralPath $payloadPath -Force
+    Write-Host "Wrapped $ExePath with startup launcher"
+}
+
 $variants = if ($Variant -eq "all") {
     @("v1", "cpu", "cupy-cuda")
 } else {
@@ -258,6 +287,11 @@ foreach ($item in $variants) {
 
     if (Test-Path -LiteralPath $generatedSpec) {
         Remove-Item -LiteralPath $generatedSpec -Force
+    }
+
+    $builtExe = Join-Path $dist "$appName.exe"
+    if (Test-Path -LiteralPath $builtExe) {
+        Wrap-WithStartupLauncher -ExePath $builtExe
     }
 
     Write-Host "Built dist\$appName.exe"
