@@ -10,9 +10,9 @@
 
 ## 发布版本
 
-- `photo_splitter_v2.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
-- `photo_splitter_v2_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
-- `photo_splitter_v2_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
+- `photo_splitter_v3.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
+- `photo_splitter_v3_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
+- `photo_splitter_v3_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
 
 ## 功能
 
@@ -24,6 +24,7 @@
 - 窗口操作：自定义顶部栏支持拖动窗口，双击顶部空白区域可最大化/还原，窗口边缘允许按 Windows 常规方式调整大小。
 - 参数控件：处理配置预设、源图底色、人脸判断自动旋转使用 iOS 风格胶囊分段控件；边界阈值、白边阈值、倾斜矫正敏感度保留连续滑块。
 - 程序内弹窗：完成、错误和提示都使用主窗口内遮罩弹窗，弹窗关闭前其它按钮不可点击。
+- 分割策略：通用平衡、积极分割、保守分割不只调整参数，也会影响边界候选、内部拆分、碎片过滤和兜底恢复策略。
 
 ![分割示例](./分割示例.jpg)
 

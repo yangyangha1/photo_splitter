@@ -70,7 +70,6 @@ function Get-PyInstallerArgs {
         @(
             "--hidden-import", "cupy",
             "--hidden-import", "cupyx",
-            "--hidden-import", "cupy.testing",
             "--hidden-import", "cupy.cuda.runtime",
             "--hidden-import", "cupy._core.syncdetect",
             "--hidden-import", "cupy_backends.cuda._softlink",
@@ -101,10 +100,16 @@ function Get-PyInstallerArgs {
         "--add-data", "photo_splitter\assets\photo_splitter_icon_preview.png;photo_splitter\assets",
         "--add-data", "photo_splitter\web_ui\dist;photo_splitter\web_ui\dist"
     ) + $opencvArgs + @(
-            "--hidden-import", "flask",
-            "--hidden-import", "webview",
-            "--hidden-import", "graphlib",
-            "--exclude-module", "tkinter",
+        "--hidden-import", "flask",
+        "--hidden-import", "webview",
+        "--hidden-import", "graphlib",
+        "--exclude-module", "photo_splitter.cli",
+        "--exclude-module", "webview.platforms.gtk",
+        "--exclude-module", "webview.platforms.qt",
+        "--exclude-module", "webview.platforms.cocoa",
+        "--exclude-module", "webview.platforms.cef",
+        "--exclude-module", "webview.platforms.android",
+        "--exclude-module", "tkinter",
         "--exclude-module", "_tkinter",
         "--exclude-module", "tcl",
         "--exclude-module", "tk",

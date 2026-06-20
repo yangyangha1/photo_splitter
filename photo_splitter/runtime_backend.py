@@ -4,6 +4,7 @@ import os
 import platform
 import subprocess
 import traceback
+from importlib.util import find_spec
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -109,6 +110,28 @@ def _numpy_edge_mask(blur: np.ndarray, lower: int, upper: int) -> np.ndarray:
     return (magnitude >= threshold).astype(np.uint8) * 255
 
 
+def release_cupy_memory(cp_module: Any | None = None) -> None:
+    """释放 CuPy 默认显存池，避免检测结束后显存长期显示为被程序占用。
+
+    CuPy 为了加速后续计算会缓存显存块；这不是泄漏，但桌面工具更需要空闲时及时归还显存。
+    CUDA context 仍会保留少量基础显存，这是驱动行为，只有进程退出才会完全释放。
+    """
+    try:
+        import gc
+
+        cp = cp_module
+        if cp is None:
+            import cupy as cp
+
+        cp.cuda.Stream.null.synchronize()
+        cp.cuda.Device().synchronize()
+        gc.collect()
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+
 @lru_cache(maxsize=1)
 def cupy_cuda_available() -> bool:
     """实际试跑 CuPy CUDA。
@@ -124,6 +147,8 @@ def cupy_cuda_available() -> bool:
             return False
         test = cp.asarray(np.zeros((8, 8, 3), dtype=np.uint8))
         _ = cp.asnumpy(test.max(axis=2) - test.min(axis=2))
+        test = None
+        release_cupy_memory(cp)
         _remember_runtime_error("cupy_cuda", None)
         return True
     except Exception as exc:
@@ -216,8 +241,13 @@ def gray_and_channel_range(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             gpu_rgb = cp.asarray(rgb_u8)
             gray_gpu = 0.299 * gpu_rgb[:, :, 0] + 0.587 * gpu_rgb[:, :, 1] + 0.114 * gpu_rgb[:, :, 2]
             range_gpu = gpu_rgb.max(axis=2).astype(cp.int16) - gpu_rgb.min(axis=2).astype(cp.int16)
-            return cp.asnumpy(gray_gpu).astype(np.float32), cp.asnumpy(range_gpu)
+            gray = cp.asnumpy(gray_gpu).astype(np.float32)
+            channel_range = cp.asnumpy(range_gpu)
+            gpu_rgb = gray_gpu = range_gpu = None
+            release_cupy_memory(cp)
+            return gray, channel_range
         except Exception:
+            release_cupy_memory()
             pass
 
     if opencv_cuda_available():
@@ -266,6 +296,8 @@ def _cupy_background_difference_mask(rgb_u8: np.ndarray, bg: np.ndarray, actual_
     """在显存中完成背景差异、灰度、通道差和前景掩膜计算，只把最终 mask 拉回内存。"""
     import cupy as cp
 
+    gpu_rgb = gpu_bg = diff_gpu = gray_gpu = min_channel = max_channel = channel_range_gpu = None
+    plain_background = mask_gpu = channel_diff = diff_sample = None
     gpu_rgb = cp.asarray(rgb_u8)
     gpu_bg = cp.asarray(bg, dtype=cp.float32)
 
@@ -298,11 +330,19 @@ def _cupy_background_difference_mask(rgb_u8: np.ndarray, bg: np.ndarray, actual_
         threshold = cp.float32(24.0)
         plain_background = (diff_gpu < cp.float32(24.0)) & (channel_range_gpu < 65)
     else:
-        threshold = cp.maximum(cp.float32(26.0), cp.percentile(diff_gpu, 55))
+        # 全量 cp.percentile 会在 GPU 上产生较大的排序/归约临时缓存。
+        # 背景阈值只需要稳定估计，抽样回 CPU 计算可以显著降低检测阶段显存峰值。
+        stride = max(1, int(max(diff_gpu.shape) // 900))
+        diff_sample = cp.asnumpy(diff_gpu[::stride, ::stride])
+        threshold = cp.float32(max(26.0, float(np.percentile(diff_sample, 55))))
         plain_background = diff_gpu < threshold * cp.float32(0.75)
 
     mask_gpu = (diff_gpu > threshold) & ~plain_background
-    return cp.asnumpy(mask_gpu).astype(bool, copy=False)
+    result = cp.asnumpy(mask_gpu).astype(bool, copy=False)
+    gpu_rgb = gpu_bg = diff_gpu = gray_gpu = min_channel = max_channel = channel_range_gpu = None
+    plain_background = mask_gpu = channel_diff = diff_sample = None
+    release_cupy_memory(cp)
+    return result
 
 
 def gray_and_blur(rgb: np.ndarray, kernel_size: int = 5) -> tuple[np.ndarray, np.ndarray]:
@@ -476,6 +516,7 @@ def background_difference_mask(rgb: np.ndarray, actual_mode: str) -> np.ndarray:
         try:
             return _cupy_background_difference_mask(rgb_u8, bg, actual_mode)
         except Exception:
+            release_cupy_memory()
             diff = np.sqrt(np.sum((rgb_u8.astype(np.float32) - bg.reshape(1, 1, 3)) ** 2, axis=2))
     else:
         diff = np.sqrt(np.sum((rgb_u8.astype(np.float32) - bg.reshape(1, 1, 3)) ** 2, axis=2))
@@ -525,7 +566,7 @@ def close_mask(mask: np.ndarray, close_size: int) -> np.ndarray:
     return np.asarray(image.filter(ImageFilter.MaxFilter(close_size)).filter(ImageFilter.MinFilter(close_size))) > 0
 
 
-def detect_runtime_environment() -> dict[str, Any]:
+def detect_runtime_environment(probe_accelerators: bool = True) -> dict[str, Any]:
     """检测运行环境，只有图像处理代码能实际调用成功时才标记加速后端可用。"""
     info: dict[str, Any] = {
         "python": platform.python_version(),
@@ -574,6 +615,14 @@ def detect_runtime_environment() -> dict[str, Any]:
         pass
     if not info["cpu_name"]:
         info["cpu_name"] = platform.processor() or ""
+
+    if not probe_accelerators:
+        cupy_installed = find_spec("cupy") is not None
+        info["gpu_available"] = bool(info["gpu_name"])
+        info["gpu_backend"] = "pending"
+        info["compute_backend"] = "pending-cuda" if info["gpu_name"] and cupy_installed else "pending-cpu"
+        info["acceleration_note"] = "启动阶段只做轻量检测；首次执行照片检测时再初始化 CuPy/CUDA，避免空闲时提前占用显存。"
+        return info
 
     info["cupy_cuda_available"] = cupy_cuda_available()
     info["opencv_cuda_available"] = opencv_cuda_available()

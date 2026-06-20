@@ -4,7 +4,15 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from .config import BACKGROUND_MODES, DEFAULT_BACKGROUND_MODE, DEFAULT_PRESET_KEY, JPEG_QUALITY, PROCESSING_PRESETS
+from .config import (
+    BACKGROUND_MODES,
+    DEFAULT_BACKGROUND_MODE,
+    DEFAULT_DETECTION_STRATEGY,
+    DEFAULT_PRESET_KEY,
+    DETECTION_STRATEGIES,
+    JPEG_QUALITY,
+    PROCESSING_PRESETS,
+)
 from .io_utils import iter_images
 from .processing import process_source_for_cli
 from .runtime_backend import detect_runtime_environment
@@ -24,6 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-area-ratio", type=float, default=None, help="Override preset minimum photo area ratio.")
     parser.add_argument("--white-threshold", type=int, default=None, help="Override preset white-border trim threshold.")
     parser.add_argument("--background-mode", choices=sorted(BACKGROUND_MODES), default=None, help="Source background mode: auto, white, gray or black. Black skips white-border trimming.")
+    parser.add_argument("--detection-strategy", choices=sorted(DETECTION_STRATEGIES), default=None, help="Detection behavior: balanced, aggressive or conservative.")
+    parser.add_argument("--split-strategy", dest="detection_strategy", choices=sorted(DETECTION_STRATEGIES), default=None, help=argparse.SUPPRESS)
     parser.add_argument("--skew-gain-percent", type=int, default=None, help="Override preset deskew sensitivity, in percent.")
     parser.add_argument("--quality", type=int, default=JPEG_QUALITY, help=f"Output JPG quality, 1-100. Default: {JPEG_QUALITY}")
     parser.add_argument("--preview", action="store_true", help="Also save preview images with detected photo boxes drawn on the original.")
@@ -46,6 +56,7 @@ def resolved_options(args: argparse.Namespace) -> dict[str, object]:
         "min_area_ratio": float(args.min_area_ratio if args.min_area_ratio is not None else preset.min_area_ratio),
         "white_threshold": int(args.white_threshold if args.white_threshold is not None else preset.white_threshold),
         "background_mode": str(args.background_mode if args.background_mode is not None else getattr(preset, "background_mode", DEFAULT_BACKGROUND_MODE)),
+        "detection_strategy": str(args.detection_strategy if args.detection_strategy is not None else getattr(preset, "detection_strategy", DEFAULT_DETECTION_STRATEGY)),
         "skew_min_score_gain": 1.0 + int(args.skew_gain_percent if args.skew_gain_percent is not None else preset.skew_gain_percent) / 100,
         "auto_face_rotate": bool(args.auto_face_rotate),
     }
@@ -93,6 +104,7 @@ def main() -> int:
             float(options["skew_min_score_gain"]),
             bool(options["auto_face_rotate"]),
             str(options["background_mode"]),
+            str(options["detection_strategy"]),
             True,
         )
         for source in images

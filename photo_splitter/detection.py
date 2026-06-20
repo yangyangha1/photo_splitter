@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -16,6 +17,197 @@ from .runtime_backend import (
     gray_and_blur,
     gray_and_channel_range,
 )
+
+DETECTION_STRATEGIES = {"balanced", "aggressive", "conservative"}
+
+
+@dataclass(frozen=True)
+class SplitStrategyConfig:
+    """预设内置的检测策略，集中管理积极/保守模式的算法行为差异。"""
+
+    name: str
+    area_ratio_factor: float
+    overlap_remove_threshold: float
+    dark_merge_gap: int
+    canny_lower_factor: float
+    canny_upper_factor: float
+    canny_min_lower: int
+    canny_min_gap: int
+    canny_max_upper: int
+    edge_close_iterations: int
+    edge_dilate_iterations: int
+    contour_area_factor: float
+    min_side: int
+    aspect_min: float
+    aspect_max: float
+    approx_side_limit: float
+    weak_shape_side_limit: float
+    content_close_size: int
+    min_component_pixels_factor: float
+    allow_single_edge_seed: bool
+    run_content_fallback: bool
+
+
+SPLIT_STRATEGIES: dict[str, SplitStrategyConfig] = {
+    "balanced": SplitStrategyConfig(
+        name="balanced",
+        area_ratio_factor=1.0,
+        overlap_remove_threshold=0.70,
+        dark_merge_gap=90,
+        canny_lower_factor=1.0,
+        canny_upper_factor=1.0,
+        canny_min_lower=18,
+        canny_min_gap=40,
+        canny_max_upper=210,
+        edge_close_iterations=2,
+        edge_dilate_iterations=1,
+        contour_area_factor=0.20,
+        min_side=45,
+        aspect_min=0.18,
+        aspect_max=5.2,
+        approx_side_limit=0.105,
+        weak_shape_side_limit=0.110,
+        content_close_size=7,
+        min_component_pixels_factor=0.08,
+        allow_single_edge_seed=True,
+        run_content_fallback=True,
+    ),
+    "aggressive": SplitStrategyConfig(
+        name="aggressive",
+        area_ratio_factor=0.78,
+        overlap_remove_threshold=0.82,
+        dark_merge_gap=20,
+        canny_lower_factor=0.78,
+        canny_upper_factor=0.92,
+        canny_min_lower=8,
+        canny_min_gap=28,
+        canny_max_upper=230,
+        edge_close_iterations=3,
+        edge_dilate_iterations=1,
+        contour_area_factor=0.12,
+        min_side=34,
+        aspect_min=0.14,
+        aspect_max=6.0,
+        approx_side_limit=0.085,
+        weak_shape_side_limit=0.090,
+        content_close_size=9,
+        min_component_pixels_factor=0.055,
+        allow_single_edge_seed=True,
+        run_content_fallback=True,
+    ),
+    "conservative": SplitStrategyConfig(
+        name="conservative",
+        area_ratio_factor=1.28,
+        overlap_remove_threshold=0.58,
+        dark_merge_gap=120,
+        canny_lower_factor=1.18,
+        canny_upper_factor=1.08,
+        canny_min_lower=20,
+        canny_min_gap=46,
+        canny_max_upper=235,
+        edge_close_iterations=1,
+        edge_dilate_iterations=0,
+        contour_area_factor=0.36,
+        min_side=62,
+        aspect_min=0.24,
+        aspect_max=4.4,
+        approx_side_limit=0.130,
+        weak_shape_side_limit=0.135,
+        content_close_size=5,
+        min_component_pixels_factor=0.12,
+        allow_single_edge_seed=False,
+        run_content_fallback=False,
+    ),
+}
+
+
+def normalize_detection_strategy(strategy: str | None) -> str:
+    value = str(strategy or "balanced").strip().lower()
+    return value if value in DETECTION_STRATEGIES else "balanced"
+
+
+def split_strategy_config(strategy: str | None) -> SplitStrategyConfig:
+    return SPLIT_STRATEGIES[normalize_detection_strategy(strategy)]
+
+
+def _strategy_area_ratio(min_area_ratio: float, strategy: str) -> float:
+    """按检测策略微调候选框面积门槛，预设滑块仍作为主控制量。"""
+    config = split_strategy_config(strategy)
+    if config.name == "aggressive":
+        return max(0.0005, min_area_ratio * config.area_ratio_factor)
+    if config.name == "conservative":
+        return min(0.02, min_area_ratio * config.area_ratio_factor)
+    return min_area_ratio * config.area_ratio_factor
+
+
+def _strategy_dark_merge_gap(strategy: str) -> int:
+    """黑底/灰底页面的相邻框合并距离，积极模式避免把弱分隔线两侧照片合并。"""
+    return split_strategy_config(strategy).dark_merge_gap
+
+
+def conservative_filter_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    image_width: int,
+    image_height: int,
+) -> list[tuple[int, int, int, int]]:
+    """保守模式下过滤异常小碎框，避免纹理、文字或照片内部边缘被当成照片。"""
+    boxes = suppress_nested_and_duplicates(boxes)
+    if len(boxes) <= 8:
+        return boxes
+
+    whole_area = image_width * image_height
+    areas = np.asarray([_box_area(box) for box in boxes], dtype=np.float32)
+    median_area = float(np.median(areas)) if areas.size else 0.0
+
+    filtered: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        area = _box_area(box)
+        if area < median_area * 0.35:
+            continue
+        if area < whole_area * 0.004:
+            continue
+        filtered.append(box)
+    return suppress_nested_and_duplicates(filtered)
+
+
+def aggressive_filter_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    image_width: int,
+    image_height: int,
+) -> list[tuple[int, int, int, int]]:
+    """积极模式保留弱候选，但清理明显小于主照片的装饰、文字和内部纹理碎片。"""
+    boxes = _remove_high_overlap_fragments(suppress_nested_and_duplicates(boxes), overlap_threshold=0.72)
+    if not boxes:
+        return []
+
+    whole_area = image_width * image_height
+    largest_area = max(_box_area(box) for box in boxes)
+    if len(boxes) > 12:
+        keep_floor = max(whole_area * 0.006, largest_area * 0.18)
+    elif len(boxes) > 8:
+        keep_floor = max(whole_area * 0.0035, largest_area * 0.06)
+    else:
+        keep_floor = max(whole_area * 0.0025, largest_area * 0.06)
+
+    filtered = [box for box in boxes if _box_area(box) >= keep_floor]
+    if not filtered:
+        filtered = [max(boxes, key=_box_area)]
+    return suppress_nested_and_duplicates(filtered)
+
+
+def finalize_strategy_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    image_width: int,
+    image_height: int,
+    strategy: str,
+) -> list[tuple[int, int, int, int]]:
+    """按最终策略做一次轻量收口；积极模式保留候选，保守模式清理异常碎框。"""
+    normalized = normalize_detection_strategy(strategy)
+    if normalized == "conservative":
+        return conservative_filter_boxes(boxes, image_width, image_height)
+    if normalized == "aggressive":
+        return aggressive_filter_boxes(boxes, image_width, image_height)
+    return suppress_nested_and_duplicates(boxes)
 
 
 def connected_components(mask: np.ndarray, min_pixels: int) -> list[tuple[int, int, int, int, int]]:
@@ -513,15 +705,19 @@ def split_boxes_on_internal_separators(
     rgb: np.ndarray,
     boxes: list[tuple[int, int, int, int]],
     min_area_ratio: float,
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
     """如果一个检测框内部还有明显白色分隔线，则递归拆成多张照片。"""
     if not boxes:
         return boxes
 
+    strategy = normalize_detection_strategy(detection_strategy)
     gray, channel_range = gray_and_channel_range(rgb)
-    white = (gray > 218) & (channel_range < 52)
+    white_gray_threshold = 208 if strategy == "aggressive" else 226 if strategy == "conservative" else 218
+    white_range_threshold = 62 if strategy == "aggressive" else 42 if strategy == "conservative" else 52
+    white = (gray > white_gray_threshold) & (channel_range < white_range_threshold)
     whole_area = rgb.shape[0] * rgb.shape[1]
-    min_area = max(900, int(whole_area * min_area_ratio))
+    min_area = max(900, int(whole_area * _strategy_area_ratio(min_area_ratio, strategy)))
     areas = np.asarray([(x2 - x1) * (y2 - y1) for x1, y1, x2, y2 in boxes], dtype=np.float32)
     median_area = float(np.median(areas)) if areas.size else 0.0
 
@@ -533,19 +729,32 @@ def split_boxes_on_internal_separators(
             return [box]
 
         local_white = white[y1:y2, x1:x2]
-        min_sep = max(4, min(width, height) // 360)
-        min_side = max(45, min(width, height) // 6)
+        min_sep = max(3 if strategy == "aggressive" else 5, min(width, height) // (460 if strategy == "aggressive" else 300 if strategy == "conservative" else 360))
+        min_side = max(
+            34 if strategy == "aggressive" else 62 if strategy == "conservative" else 45,
+            min(width, height) // (8 if strategy == "aggressive" else 5 if strategy == "conservative" else 6),
+        )
         area = width * height
         oversized = median_area > 0 and area > median_area * 1.15
-        col_thresholds = (0.72, 0.34) if oversized else (0.72,)
-        row_thresholds = (0.72, 0.34) if oversized else (0.72,)
+        if strategy == "aggressive":
+            col_thresholds = (0.62, 0.42, 0.28) if oversized else (0.62, 0.42)
+            row_thresholds = (0.62, 0.42, 0.28) if oversized else (0.62, 0.42)
+            max_separator_ratio = 0.24
+        elif strategy == "conservative":
+            col_thresholds = (0.84,)
+            row_thresholds = (0.84,)
+            max_separator_ratio = 0.12
+        else:
+            col_thresholds = (0.72, 0.34) if oversized else (0.72,)
+            row_thresholds = (0.72, 0.34) if oversized else (0.72,)
+            max_separator_ratio = 0.18
 
         for threshold in col_thresholds:
             col_runs = merge_close_runs(runs(local_white.mean(axis=0) > threshold, min_sep), max_gap=3)
             valid_col_runs = [
                 (a, b)
                 for a, b in col_runs
-                if a > min_side and width - b > min_side and b - a <= width * 0.18
+                if a > min_side and width - b > min_side and b - a <= width * max_separator_ratio
             ]
             valid_col_runs.sort(key=lambda run: abs(((run[0] + run[1]) / 2) - width / 2))
             for a, b in valid_col_runs:
@@ -564,7 +773,7 @@ def split_boxes_on_internal_separators(
             valid_row_runs = [
                 (a, b)
                 for a, b in row_runs
-                if a > min_side and height - b > min_side and b - a <= height * 0.18
+                if a > min_side and height - b > min_side and b - a <= height * max_separator_ratio
             ]
             valid_row_runs.sort(key=lambda run: abs(((run[0] + run[1]) / 2) - height / 2))
             for a, b in valid_row_runs:
@@ -618,21 +827,41 @@ def _best_regular_boundaries(
 def _detect_regular_grid_boxes(
     rgb_image: Image.Image,
     min_area_ratio: float,
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
     """识别规则排版的白边网格，例如扫描页里多张照片按行列排列。"""
+    strategy = normalize_detection_strategy(detection_strategy)
     rgb = np.asarray(rgb_image)
     gray, channel_range = gray_and_channel_range(rgb)
     if (gray < 70).mean() > 0.18:
         return []
-    white = (gray > 218) & (channel_range < 48)
+    if strategy == "aggressive":
+        white = (gray > 208) & (channel_range < 58)
+        score_threshold = 0.40
+        uniform_threshold = 0.64
+        separator_threshold = 0.14
+        min_cell_w = max(55, rgb_image.width // 8)
+        min_cell_h = max(55, rgb_image.height // 7)
+    elif strategy == "conservative":
+        white = (gray > 228) & (channel_range < 36)
+        score_threshold = 0.55
+        uniform_threshold = 0.82
+        separator_threshold = 0.24
+        min_cell_w = max(90, rgb_image.width // 6)
+        min_cell_h = max(90, rgb_image.height // 5)
+    else:
+        white = (gray > 218) & (channel_range < 48)
+        score_threshold = 0.45
+        uniform_threshold = 0.72
+        separator_threshold = 0.18
+        min_cell_w = max(70, rgb_image.width // 7)
+        min_cell_h = max(70, rgb_image.height // 6)
     height, width = gray.shape
 
     col_score = smooth(white.mean(axis=0).astype(np.float32), max(5, width // 320))
     row_score = smooth(white.mean(axis=1).astype(np.float32), max(5, height // 320))
-    min_cell_w = max(70, width // 7)
-    min_cell_h = max(70, height // 6)
     whole_area = width * height
-    min_area = max(900, int(whole_area * min_area_ratio))
+    min_area = max(900, int(whole_area * _strategy_area_ratio(min_area_ratio, strategy)))
 
     best_boxes: list[tuple[int, int, int, int]] = []
     best_score = -1.0
@@ -643,7 +872,7 @@ def _detect_regular_grid_boxes(
             continue
         x_widths = np.diff(np.asarray(x_boundaries, dtype=np.float32))
         x_uniform = 1.0 - min(1.0, float(x_widths.std() / max(1.0, x_widths.mean())))
-        if x_score < 0.45 or x_uniform < 0.72:
+        if x_score < score_threshold or x_uniform < uniform_threshold:
             continue
         for rows in range(1, 5):
             y_boundaries, y_score = _best_regular_boundaries(row_score, rows, min_cell_h)
@@ -651,7 +880,7 @@ def _detect_regular_grid_boxes(
                 continue
             y_heights = np.diff(np.asarray(y_boundaries, dtype=np.float32))
             y_uniform = 1.0 - min(1.0, float(y_heights.std() / max(1.0, y_heights.mean())))
-            if rows > 1 and (y_score < 0.45 or y_uniform < 0.72):
+            if rows > 1 and (y_score < score_threshold or y_uniform < uniform_threshold):
                 continue
 
             boxes: list[tuple[int, int, int, int]] = []
@@ -676,10 +905,11 @@ def _detect_regular_grid_boxes(
             fill_ratio = len(boxes) / total_cells
             aspects = np.asarray([(box[2] - box[0]) / max(1, box[3] - box[1]) for box in boxes], dtype=np.float32)
             extreme_ratio = float(((aspects > 2.8) | (aspects < 0.36)).mean())
-            if extreme_ratio > 0.25:
+            max_extreme_ratio = 0.34 if strategy == "aggressive" else 0.12 if strategy == "conservative" else 0.25
+            if extreme_ratio > max_extreme_ratio:
                 continue
             separator_strength = (x_score + y_score) / 2 if rows > 1 else x_score
-            if separator_strength < 0.18:
+            if separator_strength < separator_threshold:
                 continue
 
             score = (
@@ -690,7 +920,9 @@ def _detect_regular_grid_boxes(
             )
             if score > best_score:
                 best_score = score
-                if fill_ratio < 0.98 and rows >= 3:
+                if strategy == "conservative" and fill_ratio < 1.0:
+                    best_boxes = merge_boxes_without_separator(rgb, boxes)
+                elif strategy == "balanced" and fill_ratio < 0.98 and rows >= 3:
                     best_boxes = merge_boxes_without_separator(rgb, boxes)
                 else:
                     best_boxes = boxes
@@ -701,38 +933,60 @@ def _detect_regular_grid_boxes(
 def _detect_white_grid_boxes(
     rgb_image: Image.Image,
     min_area_ratio: float,
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
     """识别白色背景/白色分隔线主导的拼图页面。"""
+    strategy = normalize_detection_strategy(detection_strategy)
     rgb = np.asarray(rgb_image)
     gray, channel_range = gray_and_channel_range(rgb)
     if (gray < 70).mean() > 0.18:
         return []
-    white = (gray > 232) & (channel_range < 28)
+    if strategy == "aggressive":
+        white = (gray > 220) & (channel_range < 42)
+        separator_mean = 0.46
+        first_col_mean = 0.74
+        fallback_col_mean = 0.70
+        max_separator_ratio = 0.18
+        min_cell_floor = 30
+    elif strategy == "conservative":
+        white = (gray > 240) & (channel_range < 22)
+        separator_mean = 0.65
+        first_col_mean = 0.91
+        fallback_col_mean = 0.88
+        max_separator_ratio = 0.08
+        min_cell_floor = 48
+    else:
+        white = (gray > 232) & (channel_range < 28)
+        separator_mean = 0.55
+        first_col_mean = 0.86
+        fallback_col_mean = 0.82
+        max_separator_ratio = 0.12
+        min_cell_floor = 35
 
     height, width = gray.shape
     min_sep = max(4, min(width, height) // 260)
-    row_separators = merge_close_runs(runs(white.mean(axis=1) > 0.55, min_sep), max_gap=min_sep)
-    row_separators = [(a, b) for a, b in row_separators if b - a <= height * 0.12]
+    row_separators = merge_close_runs(runs(white.mean(axis=1) > separator_mean, min_sep), max_gap=min_sep)
+    row_separators = [(a, b) for a, b in row_separators if b - a <= height * max_separator_ratio]
     row_mask = np.zeros(height, dtype=bool)
     for y1, y2 in row_separators:
         row_mask[y1:y2] = True
 
-    min_cell_side = max(35, min(width, height) // 18)
+    min_cell_side = max(min_cell_floor, min(width, height) // 18)
     y_intervals = runs(~row_mask, min_cell_side)
     if not y_intervals:
         y_intervals = [(0, height)]
 
     whole_area = width * height
-    min_area = max(900, int(whole_area * min_area_ratio))
+    min_area = max(900, int(whole_area * _strategy_area_ratio(min_area_ratio, strategy)))
     boxes: list[tuple[int, int, int, int]] = []
 
     for y1, y2 in y_intervals:
         local_white = white[y1:y2, :]
         col_separators = merge_close_runs(
-            runs(local_white.mean(axis=0) > 0.86, min_sep),
+            runs(local_white.mean(axis=0) > first_col_mean, min_sep),
             max_gap=max(3, min_sep),
         )
-        col_separators = [(a, b) for a, b in col_separators if b - a <= width * 0.12]
+        col_separators = [(a, b) for a, b in col_separators if b - a <= width * max_separator_ratio]
         if not col_separators:
             continue
 
@@ -746,10 +1000,15 @@ def _detect_white_grid_boxes(
                 boxes.append(box)
 
     if boxes:
-        return split_boxes_on_internal_separators(rgb, suppress_nested_and_duplicates(boxes), min_area_ratio)
+        return split_boxes_on_internal_separators(
+            rgb,
+            suppress_nested_and_duplicates(boxes),
+            min_area_ratio,
+            strategy,
+        )
 
-    col_separators = merge_close_runs(runs(white.mean(axis=0) > 0.82, min_sep), max_gap=min_sep)
-    col_separators = [(a, b) for a, b in col_separators if b - a <= width * 0.12]
+    col_separators = merge_close_runs(runs(white.mean(axis=0) > fallback_col_mean, min_sep), max_gap=min_sep)
+    col_separators = [(a, b) for a, b in col_separators if b - a <= width * max_separator_ratio]
     if len(col_separators) < 1 or len(row_separators) < 1:
         return []
 
@@ -771,7 +1030,12 @@ def _detect_white_grid_boxes(
             if looks_like_photo(rgb, box, min_area):
                 boxes.append(box)
 
-    return split_boxes_on_internal_separators(rgb, suppress_nested_and_duplicates(boxes), min_area_ratio)
+    return split_boxes_on_internal_separators(
+        rgb,
+        suppress_nested_and_duplicates(boxes),
+        min_area_ratio,
+        strategy,
+    )
 
 
 def _detect_black_frame_boxes(
@@ -925,6 +1189,96 @@ def _looks_like_page_frame(box: tuple[int, int, int, int], width: int, height: i
     return _box_area(box) > width * height * 0.92 and box[0] <= width * 0.03 and box[1] <= height * 0.03
 
 
+def _filter_conservative_recovery_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    width: int,
+    height: int,
+) -> list[tuple[int, int, int, int]]:
+    """保守主流程失败后的收口过滤：保留明显照片候选，丢弃整页框和小纹理碎片。"""
+    whole_area = width * height
+    filtered: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        if _looks_like_page_frame(box, width, height):
+            continue
+        area = _box_area(box)
+        if area < whole_area * 0.006 or area > whole_area * 0.70:
+            continue
+        box_width = box[2] - box[0]
+        box_height = box[3] - box[1]
+        aspect = box_width / max(1, box_height)
+        if aspect < 0.22 or aspect > 5.8:
+            continue
+        filtered.append(box)
+
+    filtered = _remove_high_overlap_fragments(filtered, overlap_threshold=0.58)
+    if not filtered:
+        return []
+
+    largest_area = max(_box_area(box) for box in filtered)
+    keep_floor = max(whole_area * 0.010, largest_area * 0.25)
+    filtered = [box for box in filtered if _box_area(box) >= keep_floor]
+    if not filtered:
+        return []
+
+    filtered = _merge_touching_fragments(filtered, max_gap=18)
+    return conservative_filter_boxes(filtered, width, height)
+
+
+def _recover_conservative_boxes(
+    rgb_image: Image.Image,
+    min_area_ratio: float,
+    actual_mode: str,
+) -> list[tuple[int, int, int, int]]:
+    """保守模式最后兜底。
+
+    只在强边界/明确网格都失败时启用，用稍宽松的边界候选恢复灰底、黄底相册页；
+    不使用普通内容掩膜，避免把整张扫描页当作照片。
+    """
+    modes = tuple(dict.fromkeys((actual_mode, "gray", "white", "auto")))
+    candidates: list[tuple[int, int, int, int]] = []
+    for recovery_strategy in ("balanced", "aggressive"):
+        for mode in modes:
+            candidates.extend(
+                box
+                for box in _detect_edge_boundary_boxes(
+                    rgb_image,
+                    min_area_ratio,
+                    mode,
+                    recovery_strategy,
+                )
+                if not _looks_like_page_frame(box, rgb_image.width, rgb_image.height)
+            )
+    return _filter_conservative_recovery_boxes(candidates, rgb_image.width, rgb_image.height)
+
+
+def _improve_conservative_boxes(
+    rgb_image: Image.Image,
+    boxes: list[tuple[int, int, int, int]],
+    min_area_ratio: float,
+    background_mode: str,
+) -> list[tuple[int, int, int, int]]:
+    """保守模式结果质量检查。
+
+    如果主流程只框到了照片内部很小的区域，尝试用恢复检测换成更大的外层照片框。
+    """
+    boxes = conservative_filter_boxes(boxes, rgb_image.width, rgb_image.height)
+    whole_area = rgb_image.width * rgb_image.height
+    max_box_area = max((_box_area(box) for box in boxes), default=0)
+    if boxes and max_box_area >= whole_area * 0.04:
+        return boxes
+
+    mode = normalize_background_mode(background_mode)
+    actual_mode = estimate_background_mode(rgb_image) if mode == "auto" else mode
+    recovered = _recover_conservative_boxes(rgb_image, min_area_ratio, actual_mode)
+    if not recovered:
+        return boxes
+
+    max_recovered_area = max(_box_area(box) for box in recovered)
+    if not boxes or max_recovered_area > max_box_area * 2.0:
+        return recovered
+    return boxes
+
+
 def _matte_mask_for_dark_page(rgb: np.ndarray) -> np.ndarray:
     gray, channel_range = gray_and_channel_range(rgb)
     height, width = gray.shape
@@ -1027,6 +1381,7 @@ def _detect_edge_boundary_boxes(
     rgb_image: Image.Image,
     min_area_ratio: float,
     actual_mode: str,
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
     """边界优先的照片框检测。
 
@@ -1039,10 +1394,13 @@ def _detect_edge_boundary_boxes(
     except Exception:
         return []
 
+    strategy = normalize_detection_strategy(detection_strategy)
+    strategy_config = split_strategy_config(strategy)
     rgb = np.asarray(rgb_image.convert("RGB"))
     height, width = rgb.shape[:2]
     whole_area = width * height
-    min_area = max(900, int(whole_area * min_area_ratio))
+    effective_min_area_ratio = _strategy_area_ratio(min_area_ratio, strategy)
+    min_area = max(900, int(whole_area * effective_min_area_ratio))
     if width < 80 or height < 80:
         return []
 
@@ -1059,6 +1417,13 @@ def _detect_edge_boundary_boxes(
     else:
         lower = int(max(18, median * 0.50))
         upper = int(min(210, max(lower + 40, median * 1.45)))
+    lower = int(max(strategy_config.canny_min_lower, lower * strategy_config.canny_lower_factor))
+    upper = int(
+        min(
+            strategy_config.canny_max_upper,
+            max(lower + strategy_config.canny_min_gap, upper * strategy_config.canny_upper_factor),
+        )
+    )
     edges = canny_edges(blur, lower, upper)
 
     # 直边可能被老照片纹理、反光或扫描噪声打断，闭运算/轻微膨胀用于连接边界线段。
@@ -1066,7 +1431,12 @@ def _detect_edge_boundary_boxes(
     if k % 2 == 0:
         k += 1
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    closed_edges = close_and_dilate_edges(edges, kernel, close_iterations=2, dilate_iterations=1)
+    closed_edges = close_and_dilate_edges(
+        edges,
+        kernel,
+        close_iterations=strategy_config.edge_close_iterations,
+        dilate_iterations=strategy_config.edge_dilate_iterations,
+    )
 
     # 背景差异只作为辅助，让轮廓更容易闭合；后续仍要求候选框有边缘支撑。
     fg = _background_difference_mask(rgb, actual_mode)
@@ -1081,18 +1451,18 @@ def _detect_edge_boundary_boxes(
         contours, _hierarchy = cv2.findContours(source_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             contour_area = float(cv2.contourArea(contour))
-            if contour_area < min_area * 0.20:
+            if contour_area < min_area * strategy_config.contour_area_factor:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             box = (int(x), int(y), int(x + w), int(y + h))
             area = w * h
-            if area < min_area or w < 45 or h < 45:
+            if area < min_area or w < strategy_config.min_side or h < strategy_config.min_side:
                 continue
             if area > whole_area * 0.96:
                 # 整张扫描页外框不是照片本体。
                 continue
             aspect = w / max(1, h)
-            if aspect < 0.18 or aspect > 5.2:
+            if aspect < strategy_config.aspect_min or aspect > strategy_config.aspect_max:
                 continue
 
             rect = cv2.minAreaRect(contour)
@@ -1104,9 +1474,9 @@ def _detect_edge_boundary_boxes(
             side_score = _edge_support_score(edge_bool, box)
 
             # 允许轻微倾斜、圆角相纸、扫描边缘缺口；但必须像一个“大而直的照片边界”。
-            if len(approx) > 14 and side_score < 0.105:
+            if len(approx) > 14 and side_score < strategy_config.approx_side_limit:
                 continue
-            if contour_fill < 0.28 and min_rect_fill < 0.22 and side_score < 0.11:
+            if contour_fill < 0.28 and min_rect_fill < 0.22 and side_score < strategy_config.weak_shape_side_limit:
                 continue
             if not looks_like_photo(rgb, box, min_area):
                 continue
@@ -1135,14 +1505,17 @@ def _detect_photo_boxes_on_rgb(
     dark_threshold: int,
     min_area_ratio: float,
     background_mode: str = "auto",
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
+    strategy = normalize_detection_strategy(detection_strategy)
+    strategy_config = split_strategy_config(strategy)
     # 先缩小超大图做检测，再把检测框映射回原图，减少大 TIFF 的计算量。
     max_detect_side = 2200
     if max(rgb_image.width, rgb_image.height) > max_detect_side:
         scale = max_detect_side / max(rgb_image.width, rgb_image.height)
         small_size = (max(1, int(rgb_image.width * scale)), max(1, int(rgb_image.height * scale)))
         small_image = rgb_image.resize(small_size, Image.Resampling.LANCZOS)
-        small_boxes = _detect_photo_boxes_on_rgb(small_image, dark_threshold, min_area_ratio, background_mode)
+        small_boxes = _detect_photo_boxes_on_rgb(small_image, dark_threshold, min_area_ratio, background_mode, strategy)
         scaled_boxes: list[tuple[int, int, int, int]] = []
         for x1, y1, x2, y2 in small_boxes:
             scaled_boxes.append(
@@ -1162,34 +1535,47 @@ def _detect_photo_boxes_on_rgb(
             or (actual_mode in {"black", "gray"} and len(scaled_boxes) < 4)
             or any(_looks_like_page_frame(box, rgb_image.width, rgb_image.height) for box in scaled_boxes)
         ):
-            fallback_modes = ("auto", "gray") if actual_mode == "black" else (actual_mode,)
+            if strategy == "aggressive":
+                fallback_modes = tuple(dict.fromkeys((actual_mode, "auto", "white", "gray")))
+            else:
+                fallback_modes = ("auto", "gray") if actual_mode == "black" else (actual_mode,)
             fallback_edge_boxes = []
             for fallback_mode in fallback_modes:
                 candidate_boxes = [
                     box
-                    for box in _detect_edge_boundary_boxes(rgb_image, min_area_ratio, fallback_mode)
+                    for box in _detect_edge_boundary_boxes(rgb_image, min_area_ratio, fallback_mode, strategy)
                     if not _looks_like_page_frame(box, rgb_image.width, rgb_image.height)
                 ]
                 if len(candidate_boxes) > len(fallback_edge_boxes):
                     fallback_edge_boxes = candidate_boxes
             if len(fallback_edge_boxes) >= 2:
-                fallback_edge_boxes = _remove_high_overlap_fragments(fallback_edge_boxes, overlap_threshold=0.70)
-                if actual_mode in {"black", "gray"}:
-                    return _merge_touching_fragments(fallback_edge_boxes, max_gap=90)
-                return merge_cross_grid_fragments(
-                    full_rgb,
-                    split_boxes_on_internal_separators(full_rgb, fallback_edge_boxes, min_area_ratio),
+                fallback_edge_boxes = _remove_high_overlap_fragments(
+                    fallback_edge_boxes,
+                    overlap_threshold=strategy_config.overlap_remove_threshold,
                 )
+                if actual_mode in {"black", "gray"}:
+                    return _merge_touching_fragments(
+                        fallback_edge_boxes,
+                        max_gap=_strategy_dark_merge_gap(strategy),
+                    )
+                split_boxes = split_boxes_on_internal_separators(full_rgb, fallback_edge_boxes, min_area_ratio, strategy)
+                if strategy == "conservative":
+                    split_boxes = merge_boxes_without_separator(full_rgb, split_boxes)
+                return merge_cross_grid_fragments(full_rgb, split_boxes)
         if (full_gray < 70).mean() > 0.18:
+            if strategy == "aggressive":
+                split_boxes = split_boxes_on_internal_separators(full_rgb, scaled_boxes, min_area_ratio, strategy)
+                return merge_cross_grid_fragments(full_rgb, split_boxes)
             return merge_dark_layout_fragments(full_rgb, scaled_boxes)
-        return merge_cross_grid_fragments(
-            full_rgb,
-            split_boxes_on_internal_separators(full_rgb, scaled_boxes, min_area_ratio),
-        )
+        split_boxes = split_boxes_on_internal_separators(full_rgb, scaled_boxes, min_area_ratio, strategy)
+        if strategy == "conservative":
+            split_boxes = merge_boxes_without_separator(full_rgb, split_boxes)
+        return merge_cross_grid_fragments(full_rgb, split_boxes)
 
     rgb = np.asarray(rgb_image)
     mode = normalize_background_mode(background_mode)
     actual_mode = estimate_background_mode(rgb_image) if mode == "auto" else mode
+    overlap_threshold = strategy_config.overlap_remove_threshold
 
     # 第一优先级：深色相框页面。先按非黑相框区域拆开，避免把整张黑框拼图当成一个大框。
     if actual_mode == "black":
@@ -1198,44 +1584,55 @@ def _detect_photo_boxes_on_rgb(
             return merge_dark_layout_fragments(rgb, black_frame_boxes)
         dark_edge_boxes = [
             box
-            for box in _detect_edge_boundary_boxes(rgb_image, min_area_ratio, "auto")
+            for box in _detect_edge_boundary_boxes(rgb_image, min_area_ratio, "auto", strategy)
             if not _looks_like_page_frame(box, rgb_image.width, rgb_image.height)
         ]
         if len(dark_edge_boxes) >= 2:
             return _merge_touching_fragments(
-                _remove_high_overlap_fragments(dark_edge_boxes, overlap_threshold=0.70),
-                max_gap=90,
+                _remove_high_overlap_fragments(dark_edge_boxes, overlap_threshold=overlap_threshold),
+                max_gap=_strategy_dark_merge_gap(strategy),
             )
 
     # 第二优先级：明确的扫描/拼图网格。自动底色判断可能把发黄白底识别成灰底，
     # 因此这里无条件先尝试网格；网格不足时再进入边界优先算法。
-    grid_boxes = _detect_white_grid_boxes(rgb_image, min_area_ratio)
-    regular_grid_boxes = _detect_regular_grid_boxes(rgb_image, min_area_ratio)
+    grid_boxes = _detect_white_grid_boxes(rgb_image, min_area_ratio, strategy)
+    regular_grid_boxes = _detect_regular_grid_boxes(rgb_image, min_area_ratio, strategy)
     if len(grid_boxes) >= 2 or len(regular_grid_boxes) >= 3:
         selected = grid_boxes if len(grid_boxes) >= len(regular_grid_boxes) else regular_grid_boxes
-        selected = _remove_high_overlap_fragments(selected)
+        selected = _remove_high_overlap_fragments(selected, overlap_threshold=overlap_threshold)
         if len(selected) >= 2:
             if actual_mode == "black":
                 return selected
-            return merge_cross_grid_fragments(rgb, split_boxes_on_internal_separators(rgb, selected, min_area_ratio))
+            split_boxes = split_boxes_on_internal_separators(rgb, selected, min_area_ratio, strategy)
+            if strategy == "conservative":
+                split_boxes = merge_boxes_without_separator(rgb, split_boxes)
+            return merge_cross_grid_fragments(rgb, split_boxes)
 
     # 第二优先级：边界检测。照片边缘通常是直线和闭合轮廓，背景颜色不均匀时也比纯颜色分割更稳。
-    edge_boxes = _detect_edge_boundary_boxes(rgb_image, min_area_ratio, actual_mode)
+    edge_boxes = _detect_edge_boundary_boxes(rgb_image, min_area_ratio, actual_mode, strategy)
     edge_boxes = [box for box in edge_boxes if not _looks_like_page_frame(box, rgb_image.width, rgb_image.height)]
     if len(edge_boxes) >= 2:
-        edge_boxes = _remove_high_overlap_fragments(edge_boxes, overlap_threshold=0.70)
+        edge_boxes = _remove_high_overlap_fragments(edge_boxes, overlap_threshold=overlap_threshold)
         if actual_mode in {"black", "gray"}:
+            if strategy == "aggressive":
+                return _merge_touching_fragments(edge_boxes, max_gap=_strategy_dark_merge_gap(strategy))
             return merge_dark_layout_fragments(rgb, edge_boxes)
-        return merge_cross_grid_fragments(rgb, split_boxes_on_internal_separators(rgb, edge_boxes, min_area_ratio))
+        split_boxes = split_boxes_on_internal_separators(rgb, edge_boxes, min_area_ratio, strategy)
+        if strategy == "conservative":
+            split_boxes = merge_boxes_without_separator(rgb, split_boxes)
+        return merge_cross_grid_fragments(rgb, split_boxes)
 
     # 第三优先级：底色明确时再次尝试颜色专用算法。灰底/杂色底保持边缘优先，避免纯颜色误分割。
     if actual_mode == "white":
-        grid_boxes = _detect_white_grid_boxes(rgb_image, min_area_ratio)
-        regular_grid_boxes = _detect_regular_grid_boxes(rgb_image, min_area_ratio)
+        grid_boxes = _detect_white_grid_boxes(rgb_image, min_area_ratio, strategy)
+        regular_grid_boxes = _detect_regular_grid_boxes(rgb_image, min_area_ratio, strategy)
         if len(grid_boxes) >= 2 or len(regular_grid_boxes) >= 3:
             selected = grid_boxes if len(grid_boxes) >= len(regular_grid_boxes) else regular_grid_boxes
-            selected = _remove_high_overlap_fragments(selected)
-            return merge_cross_grid_fragments(rgb, split_boxes_on_internal_separators(rgb, selected, min_area_ratio))
+            selected = _remove_high_overlap_fragments(selected, overlap_threshold=overlap_threshold)
+            split_boxes = split_boxes_on_internal_separators(rgb, selected, min_area_ratio, strategy)
+            if strategy == "conservative":
+                split_boxes = merge_boxes_without_separator(rgb, split_boxes)
+            return merge_cross_grid_fragments(rgb, split_boxes)
 
     gray, channel_range = gray_and_channel_range(rgb)
 
@@ -1257,16 +1654,22 @@ def _detect_photo_boxes_on_rgb(
         frame_highlight = (gray < 115) & (channel_range < 18)
         interesting = (gray > dark_threshold) & ~plain_white & ~frame_highlight
 
-    if len(edge_boxes) == 1:
+    if len(edge_boxes) == 1 and strategy_config.allow_single_edge_seed:
         # 只有一个高质量边界框时先保留，后面与兜底结果一起去重，防止单张照片模式漏检。
         boxes_seed = list(edge_boxes)
     else:
         boxes_seed = []
-    mask = close_mask(interesting, close_size=7)
+    if not strategy_config.run_content_fallback:
+        recovered = _recover_conservative_boxes(rgb_image, min_area_ratio, actual_mode)
+        if recovered:
+            return recovered
+        return finalize_strategy_boxes(boxes_seed, rgb_image.width, rgb_image.height, strategy)
+    mask = close_mask(interesting, close_size=strategy_config.content_close_size)
 
     whole_area = rgb_image.width * rgb_image.height
-    min_pixels = max(220, int(whole_area * min_area_ratio * 0.08))
-    min_area = max(900, int(whole_area * min_area_ratio))
+    effective_min_area_ratio = _strategy_area_ratio(min_area_ratio, strategy)
+    min_pixels = max(220, int(whole_area * effective_min_area_ratio * strategy_config.min_component_pixels_factor))
+    min_area = max(900, int(whole_area * effective_min_area_ratio))
 
     raw_boxes = connected_components(mask, min_pixels)
     boxes: list[tuple[int, int, int, int]] = list(boxes_seed)
@@ -1278,8 +1681,13 @@ def _detect_photo_boxes_on_rgb(
 
     boxes = suppress_nested_and_duplicates(boxes)
     if (gray < 70).mean() > 0.18:
+        if strategy == "aggressive":
+            return _merge_touching_fragments(boxes, max_gap=_strategy_dark_merge_gap(strategy))
         return merge_dark_layout_fragments(rgb, boxes)
-    return merge_cross_grid_fragments(rgb, split_boxes_on_internal_separators(rgb, boxes, min_area_ratio))
+    split_boxes = split_boxes_on_internal_separators(rgb, boxes, min_area_ratio, strategy)
+    if strategy == "conservative":
+        split_boxes = merge_boxes_without_separator(rgb, split_boxes)
+    return merge_cross_grid_fragments(rgb, split_boxes)
 
 
 def split_image(
@@ -1289,6 +1697,7 @@ def split_image(
     auto_deskew: bool = False,
     deskew_min_score_gain: float = 1.04,
     background_mode: str = "auto",
+    detection_strategy: str = "balanced",
 ) -> tuple[Image.Image, list[tuple[int, int, int, int]], float]:
     # 默认不在整张拼图上矫正倾斜；每张照片的倾斜角可能不同，分割后再处理更稳。
     if auto_deskew:
@@ -1296,7 +1705,11 @@ def split_image(
     else:
         processed_image = ImageOps.exif_transpose(image).convert("RGB")
         angle = 0.0
-    boxes = _detect_photo_boxes_on_rgb(processed_image, dark_threshold, min_area_ratio, background_mode)
+    boxes = _detect_photo_boxes_on_rgb(processed_image, dark_threshold, min_area_ratio, background_mode, detection_strategy)
+    if normalize_detection_strategy(detection_strategy) == "conservative":
+        boxes = _improve_conservative_boxes(processed_image, boxes, min_area_ratio, background_mode)
+    else:
+        boxes = finalize_strategy_boxes(boxes, processed_image.width, processed_image.height, detection_strategy)
     return processed_image, boxes, angle
 
 
@@ -1305,6 +1718,13 @@ def detect_photo_boxes(
     dark_threshold: int,
     min_area_ratio: float,
     background_mode: str = "auto",
+    detection_strategy: str = "balanced",
 ) -> list[tuple[int, int, int, int]]:
-    _processed_image, boxes, _angle = split_image(image, dark_threshold, min_area_ratio, background_mode=background_mode)
+    _processed_image, boxes, _angle = split_image(
+        image,
+        dark_threshold,
+        min_area_ratio,
+        background_mode=background_mode,
+        detection_strategy=detection_strategy,
+    )
     return boxes

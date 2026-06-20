@@ -2,7 +2,7 @@
   <main class="app-shell">
     <header class="topbar" @dblclick="handleTopbarDoubleClick">
       <div class="brand window-drag">
-        <img :src="appIconUrl" alt="" />
+        <img :src="appIconUrl" alt="" decoding="async" />
         <strong>照片分割器</strong>
       </div>
       <div class="topbar-center">
@@ -34,7 +34,7 @@
           @apply-preset="applyPreset(batch.options)"
           @parameter-change="logParameterChange(batch.logs, $event)"
         />
-        <button class="primary-action main-action" :disabled="batch.processing" @click="detectBatch">批量检测</button>
+        <button class="primary-action main-action" :disabled="batch.processing" @click="detectBatch">{{ batchActionText }}</button>
         <p class="status-line">{{ batch.status }}</p>
       </aside>
 
@@ -45,7 +45,7 @@
             <h3>{{ group.name }}</h3>
             <div class="file-grid">
               <article v-for="item in group.items" :key="item.path" class="file-tile">
-                <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" />
+                <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" loading="lazy" decoding="async" />
                 <div v-else class="file-icon">IMG</div>
                 <strong>{{ item.name }}</strong>
                 <span>{{ item.relative || item.path }}</span>
@@ -66,7 +66,7 @@
                   @click="openBatchItem(item, $event)"
                 >
                   <div class="detection-thumb">
-                    <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" />
+                    <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" loading="lazy" decoding="async" />
                     <div v-else class="file-icon">IMG</div>
                     <i v-for="(box, boxIndex) in item.boxes || []" :key="boxIndex" class="mini-box" :style="miniBoxStyle(item, box)"></i>
                   </div>
@@ -105,7 +105,7 @@
 
       <div v-if="batch.processing" class="process-shield">
         <div class="liquid-progress">
-          <span>{{ batch.jobMode === "export" ? "批量导出中" : "批量检测中" }}</span>
+          <span>{{ batch.jobMode === "export" ? "批量导出中" : batch.detectMode === "redetect" ? "重新检测中" : "批量检测中" }}</span>
           <strong>{{ batch.status }}</strong>
           <div class="progress-track">
             <i :style="{ width: `${batchProgressPercent}%` }"></i>
@@ -145,7 +145,7 @@
             @pointerdown="startPreviewPan"
           >
             <div class="image-layer" :style="imageLayerStyle">
-              <img ref="imageRef" :src="single.imageUrl" @load="measureImage" />
+              <img ref="imageRef" :src="single.imageUrl" alt="" decoding="async" @load="measureImage" />
               <div
                 v-for="(box, index) in displayBoxes"
                 :key="index"
@@ -169,7 +169,7 @@
 
       <aside class="right-pane">
         <PanelTitle title="检测框列表" />
-        <div class="queue-card">
+        <div class="queue-card box-list-card">
           <div v-for="(box, index) in single.boxes" :key="index" class="queue-row done" :class="{ active: selectedBox === index }" @click="selectedBox = index">
             <span>{{ String(index + 1).padStart(3, '0') }}</span>
             <b>{{ Math.round(box[2] - box[0]) }} x {{ Math.round(box[3] - box[1]) }}</b>
@@ -234,11 +234,11 @@ const batchReturnScrollTop = ref(0);
 const batchReturnOffsetTop = ref(0);
 const config = reactive({
   presets: [
-    { key: "balanced", name: "通用平衡", dark_threshold: 70, min_area_ratio: 0.002, white_threshold: 225, background_mode: "auto", skew_gain_percent: 4 },
-    { key: "white_scan", name: "白底扫描件", dark_threshold: 68, min_area_ratio: 0.0016, white_threshold: 218, background_mode: "white", skew_gain_percent: 4 },
-    { key: "dark_frame", name: "黑框/暗边相册", dark_threshold: 58, min_area_ratio: 0.0025, white_threshold: 240, background_mode: "black", skew_gain_percent: 5 },
-    { key: "aggressive", name: "积极分割", dark_threshold: 78, min_area_ratio: 0.0012, white_threshold: 212, background_mode: "auto", skew_gain_percent: 3 },
-    { key: "conservative", name: "保守分割", dark_threshold: 62, min_area_ratio: 0.0035, white_threshold: 235, background_mode: "auto", skew_gain_percent: 7 },
+    { key: "balanced", name: "通用平衡", dark_threshold: 70, min_area_ratio: 0.002, white_threshold: 225, background_mode: "auto", skew_gain_percent: 4, detection_strategy: "balanced" },
+    { key: "white_scan", name: "白底扫描件", dark_threshold: 68, min_area_ratio: 0.0016, white_threshold: 218, background_mode: "white", skew_gain_percent: 4, detection_strategy: "balanced" },
+    { key: "dark_frame", name: "黑框/暗边相册", dark_threshold: 58, min_area_ratio: 0.0025, white_threshold: 240, background_mode: "black", skew_gain_percent: 5, detection_strategy: "balanced" },
+    { key: "aggressive", name: "积极分割", dark_threshold: 78, min_area_ratio: 0.0012, white_threshold: 212, background_mode: "auto", skew_gain_percent: 3, detection_strategy: "aggressive" },
+    { key: "conservative", name: "保守分割", dark_threshold: 62, min_area_ratio: 0.0035, white_threshold: 235, background_mode: "auto", skew_gain_percent: 7, detection_strategy: "conservative" },
   ],
   background_modes: [
     { key: "auto", label: "自动判断" },
@@ -251,6 +251,7 @@ const config = reactive({
 });
 const runtime = ref(null);
 const modal = ref(null);
+let runtimeDetectTimer = 0;
 
 const defaultOptions = () => ({
   preset: "balanced",
@@ -259,6 +260,8 @@ const defaultOptions = () => ({
   white_threshold: 225,
   background_mode: "auto",
   skew_gain_percent: 4,
+  detection_strategy: "balanced",
+  split_strategy: "balanced",
   auto_face_rotate: false,
 });
 
@@ -277,6 +280,9 @@ const batch = reactive({
   processing: false,
   detected: false,
   jobMode: "",
+  detectMode: "full",
+  progressTotal: 0,
+  redetectTargetKeys: [],
   thumbToken: 0,
 });
 
@@ -311,8 +317,9 @@ const resizeEdges = ["n", "s", "w", "e", "nw", "ne", "sw", "se"];
 const windowResize = ref(null);
 
 const batchProgressPercent = computed(() => {
-  if (!batch.items.length) return 0;
-  return Math.max(0, Math.min(100, Math.round((batch.done / batch.items.length) * 100)));
+  const total = batch.processing && batch.progressTotal ? batch.progressTotal : batch.items.length;
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((batch.done / total) * 100)));
 });
 
 const groupedBatchItems = computed(() => {
@@ -331,6 +338,13 @@ const groupedBatchItems = computed(() => {
 const singleActionText = computed(() => {
   if (single.processing) return "检测中...";
   return single.detected ? "重新检测" : "检测并预览";
+});
+
+const batchActionText = computed(() => {
+  if (batch.processing && batch.jobMode === "detect") {
+    return batch.detectMode === "redetect" ? "重新检测中..." : "检测中...";
+  }
+  return batch.detected ? "重新检测" : "批量检测";
 });
 
 const batchPreviewSubtitle = computed(() => {
@@ -381,6 +395,18 @@ function batchItemKey(item) {
   return item.image_id || `${item.path || ""}::${item.page_stem || ""}`;
 }
 
+function batchStableKey(item) {
+  return `${item.path || ""}::${item.page_stem || ""}`;
+}
+
+function totalBatchBoxes(items = batch.items) {
+  return items.reduce((sum, item) => sum + Number(item.box_count ?? item.boxes?.length ?? 0), 0);
+}
+
+function uniquePaths(items) {
+  return Array.from(new Set(items.map((item) => item.path).filter(Boolean)));
+}
+
 function scrollBatchQueueToRunning() {
   const queue = batchQueueRef.value;
   if (!queue || queue.scrollHeight <= queue.clientHeight + 2) return;
@@ -395,13 +421,13 @@ function waitForFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
+function waitMs(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function scrollBatchPreviewToItem(itemId, restoreAnchor = false, highlight = false) {
   const scroller = batchDetectionRef.value;
   if (!scroller || !itemId) return false;
-  if (batchReturnScrollTop.value > 0) {
-    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    scroller.scrollTop = Math.min(batchReturnScrollTop.value, maxTop);
-  }
   const target = Array.from(scroller.querySelectorAll(".detection-tile")).find((tile) => tile.dataset.batchItemId === itemId);
   if (!target) return false;
 
@@ -411,15 +437,14 @@ function scrollBatchPreviewToItem(itemId, restoreAnchor = false, highlight = fal
     const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     const desiredTop = scroller.scrollTop + targetRect.top - scrollerRect.top - batchReturnOffsetTop.value;
     scroller.scrollTop = Math.max(0, Math.min(maxTop, desiredTop));
-  }
-
-  const updatedTargetRect = target.getBoundingClientRect();
-  const topGap = updatedTargetRect.top - scrollerRect.top;
-  const bottomGap = updatedTargetRect.bottom - scrollerRect.bottom;
-  if (topGap < 8) {
-    scroller.scrollTop += topGap - 8;
-  } else if (bottomGap > -8) {
-    scroller.scrollTop += bottomGap + 8;
+  } else {
+    const topGap = targetRect.top - scrollerRect.top;
+    const bottomGap = targetRect.bottom - scrollerRect.bottom;
+    if (topGap < 8) {
+      scroller.scrollTop += topGap - 8;
+    } else if (bottomGap > -8) {
+      scroller.scrollTop += bottomGap + 8;
+    }
   }
   if (highlight) {
     target.classList.add("return-highlight");
@@ -431,7 +456,9 @@ function scrollBatchPreviewToItem(itemId, restoreAnchor = false, highlight = fal
 async function restoreBatchPreviewPosition(itemId) {
   await nextTick();
   let found = false;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  const delays = [0, 0, 40, 120, 260];
+  for (const delay of delays) {
+    if (delay) await waitMs(delay);
     await waitForFrame();
     found = scrollBatchPreviewToItem(itemId, true, false) || found;
   }
@@ -456,6 +483,13 @@ function sourceThumbUrl(item) {
   if (!url) return "";
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}scan=${batch.thumbToken || Date.now()}`;
+}
+
+function cacheBustUrl(url, token = Date.now()) {
+  const value = String(url || "");
+  if (!value) return "";
+  const separator = value.includes("?") ? "&" : "?";
+  return `${value}${separator}t=${token}`;
 }
 
 async function api(path, body) {
@@ -496,8 +530,7 @@ async function choosePath(kind, title) {
     const selected = await bridge.select_path(kind, title);
     return selected || "";
   }
-  const data = await api("/api/dialog", { kind, title });
-  return data.path || "";
+  throw new Error("当前运行环境没有原生路径选择接口，请手动输入路径。");
 }
 
 async function startWindowResize(event) {
@@ -618,6 +651,8 @@ function applyPreset(options) {
   options.white_threshold = preset.white_threshold;
   options.background_mode = preset.background_mode;
   options.skew_gain_percent = preset.skew_gain_percent;
+  options.detection_strategy = preset.detection_strategy || preset.split_strategy || "balanced";
+  options.split_strategy = options.detection_strategy;
 }
 
 function runtimeSummary(info) {
@@ -628,6 +663,8 @@ function runtimeSummary(info) {
     "opencv-opencl": "OpenCV OpenCL 加速",
     "opencv-cpu": "OpenCV CPU",
     "numpy-cpu": "NumPy CPU",
+    "pending-cuda": "检测时优先确认 CuPy CUDA",
+    "pending-cpu": "检测时确认可用后端",
   };
   const cpu = info.cpu_name || `${info.cpu_count || 0} 线程 CPU`;
   const gpu = info.gpu_name || "未检测到独立 GPU";
@@ -635,6 +672,19 @@ function runtimeSummary(info) {
   return {
     html: `检测到CPU：${escapeLogHtml(cpu)}；GPU：${escapeLogHtml(gpu)}；<br>当前使用算力：<b>${escapeLogHtml(backend)}</b>。`,
   };
+}
+
+async function loadRuntimeInfo() {
+  try {
+    const rt = await api("/api/runtime?probe=0");
+    runtime.value = rt.runtime;
+    const runtimeLine = runtimeSummary(runtime.value);
+    pushLog(batch.logs, runtimeLine);
+    pushLog(single.logs, runtimeLine);
+  } catch (error) {
+    pushLog(batch.logs, `系统检测失败：${error.message || error}`);
+    pushLog(single.logs, `系统检测失败：${error.message || error}`);
+  }
 }
 
 function queueTone(status) {
@@ -689,7 +739,7 @@ async function loadSinglePreview(path) {
   try {
     const data = await api("/api/single/preview", { source });
     single.imageId = "";
-    single.imageUrl = `${data.image_url}?t=${Date.now()}`;
+    single.imageUrl = cacheBustUrl(data.image_url);
     single.imageWidth = data.width;
     single.imageHeight = data.height;
     single.boxes = [];
@@ -717,6 +767,9 @@ async function scanBatch() {
     batch.saved = 0;
     batch.detected = false;
     batch.jobMode = "";
+    batch.detectMode = "full";
+    batch.progressTotal = 0;
+    batch.redetectTargetKeys = [];
     batch.thumbToken = Date.now();
     batch.status = `已扫描 ${data.count} 个文件`;
     pushLog(batch.logs, `扫描完成：${data.count} 个文件。`);
@@ -729,22 +782,39 @@ async function detectBatch() {
   try {
     if (!batch.inputDir.trim()) throw new Error("输入目录为空。");
     if (!batch.items.length) await scanBatch();
+    const isRedetect = batch.detected;
+    const targetItems = isRedetect ? batch.items.filter((item) => !item.edited) : batch.items;
+    const targetPaths = uniquePaths(targetItems);
+    if (isRedetect && !targetPaths.length) {
+      batch.status = "没有未修改的图片需要重新检测。";
+      pushLog(batch.logs, "重新检测跳过：没有未修改的图片。");
+      return;
+    }
+    if (!targetPaths.length) throw new Error("没有可检测的图片。");
+    const targetKeys = new Set(targetItems.map(batchStableKey));
     const data = await api("/api/batch/detect", {
       input_dir: batch.inputDir,
       output_dir: batch.outputDir,
-      images: batch.items.map((item) => item.path),
+      images: targetPaths,
       options: batch.options,
+      preserve_detection_state: isRedetect,
     });
     batch.jobId = data.job_id;
     batch.serverLogCount = 0;
     batch.jobMode = "detect";
-    batch.detected = false;
+    batch.detectMode = isRedetect ? "redetect" : "full";
+    batch.redetectTargetKeys = Array.from(targetKeys);
+    batch.progressTotal = targetPaths.length;
+    if (!isRedetect) batch.detected = false;
     batch.processing = true;
-    batch.status = "检测中 0 / " + batch.items.length;
-    pushLog(batch.logs, `开始批量检测：${batch.items.length} 个文件。`);
+    batch.done = 0;
+    batch.pending = targetPaths.length;
+    batch.status = `${isRedetect ? "重新检测中" : "检测中"} 0 / ${targetPaths.length}`;
+    pushLog(batch.logs, `${isRedetect ? "开始重新检测未修改图片" : "开始批量检测"}：${targetPaths.length} 个文件。`);
     pollJob();
   } catch (error) {
     batch.processing = false;
+    batch.progressTotal = 0;
     showError(error);
   }
 }
@@ -763,12 +833,14 @@ async function exportBatch() {
     batch.jobId = data.job_id;
     batch.serverLogCount = 0;
     batch.jobMode = "export";
+    batch.progressTotal = batch.items.length;
     batch.processing = true;
     batch.status = "导出中 0 / " + batch.items.length;
     pushLog(batch.logs, `确认导出开始：${batch.items.length} 个检测结果。`);
     pollJob();
   } catch (error) {
     batch.processing = false;
+    batch.progressTotal = 0;
     showError(error);
   }
 }
@@ -778,6 +850,40 @@ async function pollJob() {
   try {
     const data = await api(`/api/jobs/${batch.jobId}`);
     const job = data.job;
+    const isRedetect = job.kind === "detect" && batch.detectMode === "redetect";
+    job.logs.slice(batch.serverLogCount).forEach((line) => pushLog(batch.logs, line));
+    batch.serverLogCount = job.logs.length;
+    if (isRedetect) {
+      batch.done = job.status === "done" ? job.total : job.index;
+      batch.pending = Math.max(0, job.total - batch.done);
+      batch.saved = totalBatchBoxes();
+      batch.status = job.status === "done" ? "重新检测完成" : `重新检测中 ${job.index} / ${job.total}`;
+      if (job.status !== "done") {
+        window.setTimeout(pollJob, 700);
+        return;
+      }
+      const targetKeys = new Set(batch.redetectTargetKeys);
+      const replacements = new Map();
+      job.items.forEach((item) => {
+        const key = batchStableKey(item);
+        if (targetKeys.has(key)) replacements.set(key, item);
+      });
+      let updatedCount = 0;
+      batch.items = batch.items.map((item) => {
+        const replacement = replacements.get(batchStableKey(item));
+        if (!replacement || item.edited) return item;
+        updatedCount += 1;
+        return { ...replacement, options: cloneOptions(batch.options), updated_at: Date.now() };
+      });
+      batch.processing = false;
+      batch.detected = true;
+      batch.done = batch.items.length;
+      batch.pending = 0;
+      batch.saved = totalBatchBoxes();
+      batch.progressTotal = 0;
+      batch.status = `重新检测完成：${updatedCount} 张未修改图片，当前检测框 ${batch.saved} 个`;
+      return;
+    }
     batch.items = job.items;
     batch.done = job.items.filter((item) => item.status === "已完成" || item.status === "失败").length;
     if (job.kind === "detect") {
@@ -785,8 +891,6 @@ async function pollJob() {
     }
     batch.pending = Math.max(0, job.total - batch.done);
     batch.saved = job.saved;
-    job.logs.slice(batch.serverLogCount).forEach((line) => pushLog(batch.logs, line));
-    batch.serverLogCount = job.logs.length;
     const runningLabel = job.kind === "export" ? "导出中" : "检测中";
     const doneLabel = job.kind === "export" ? "导出完成" : "检测完成";
     batch.status = job.status === "done" ? doneLabel : `${runningLabel} ${job.index} / ${job.total}`;
@@ -801,11 +905,14 @@ async function pollJob() {
       batch.done = batch.items.length;
       batch.pending = 0;
       batch.status = `检测完成：${batch.items.length} 张图片，检测框 ${job.saved} 个`;
+      batch.progressTotal = 0;
       return;
     }
+    batch.progressTotal = 0;
     showModal("success", "导出完成", `已输出 ${job.saved} 张照片。`, job.output_dir);
   } catch (error) {
     batch.processing = false;
+    batch.progressTotal = 0;
     showError(error);
   }
 }
@@ -817,6 +924,9 @@ function clearBatch() {
   batch.saved = 0;
   batch.detected = false;
   batch.jobMode = "";
+  batch.detectMode = "full";
+  batch.progressTotal = 0;
+  batch.redetectTargetKeys = [];
   batch.status = "未扫描文件";
   batchReturnTargetId.value = "";
   batchReturnScrollTop.value = 0;
@@ -859,7 +969,7 @@ function openBatchItem(item, event) {
   single.source = item.path || "";
   single.outputDir = batch.outputDir;
   single.imageId = item.image_id;
-  single.imageUrl = `${item.image_url}?t=${item.updated_at || Date.now()}`;
+  single.imageUrl = cacheBustUrl(item.image_url, item.updated_at || Date.now());
   single.imageWidth = item.width || 1;
   single.imageHeight = item.height || 1;
   single.boxes = (item.boxes || []).map((box) => [...box]);
@@ -897,6 +1007,7 @@ async function returnToBatchPreview() {
         ...batch.items[index],
         image_id: data.image_id,
         image_url: data.image_url,
+        full_image_url: data.full_image_url,
         width: data.width,
         height: data.height,
         boxes: data.boxes,
@@ -925,13 +1036,18 @@ async function returnToBatchPreview() {
 async function detectSingle() {
   try {
     if (!single.source.trim()) throw new Error("单张照片为空。");
-    single.processing = true;
     single.progressTitle = single.detected ? "正在重新检测" : "正在检测并生成预览";
     single.status = single.detected ? "正在重新检测..." : "正在检测...";
     pushLog(single.logs, single.detected ? "重新检测开始。" : "检测并预览开始。");
-    const data = await api("/api/single/detect", { source: single.source, options: single.options });
+    single.processing = true;
+    const data = await api("/api/single/detect", {
+      source: single.source,
+      options: single.options,
+      preserve_detection_state: single.fromBatch,
+      preserve_image_id: single.batchImageId,
+    });
     single.imageId = data.image_id;
-    single.imageUrl = `${data.image_url}?t=${Date.now()}`;
+    single.imageUrl = cacheBustUrl(data.image_url);
     single.imageWidth = data.width;
     single.imageHeight = data.height;
     single.boxes = data.boxes;
@@ -1139,19 +1255,11 @@ onMounted(async () => {
     pushLog(single.logs, `配置读取失败：${error.message || error}`);
   }
 
-  try {
-    const rt = await api("/api/runtime");
-    runtime.value = rt.runtime;
-    const runtimeLine = runtimeSummary(runtime.value);
-    pushLog(batch.logs, runtimeLine);
-    pushLog(single.logs, runtimeLine);
-  } catch (error) {
-    pushLog(batch.logs, `系统检测失败：${error.message || error}`);
-    pushLog(single.logs, `系统检测失败：${error.message || error}`);
-  }
+  runtimeDetectTimer = window.setTimeout(loadRuntimeInfo, 600);
 });
 
 onBeforeUnmount(() => {
+  window.clearTimeout(runtimeDetectTimer);
   window.removeEventListener("resize", measureImage);
   window.removeEventListener("pointermove", onPreviewPan);
   window.removeEventListener("pointercancel", stopPreviewPan);

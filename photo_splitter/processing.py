@@ -24,6 +24,7 @@ def save_split_photos(
     skew_min_score_gain: float = 1.04,
     auto_face_rotate: bool = False,
     background_mode: str = "auto",
+    detection_strategy: str = "balanced",
     include_root_name: bool = False,
 ) -> list[Path]:
     """分割单个源文件并保存输出照片。
@@ -36,7 +37,13 @@ def save_split_photos(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     for page_stem, image in iter_source_images(source):
-        processed_image, boxes, _angle = split_image(image, dark_threshold, min_area_ratio, background_mode=background_mode)
+        processed_image, boxes, _angle = split_image(
+            image,
+            dark_threshold,
+            min_area_ratio,
+            background_mode=background_mode,
+            detection_strategy=detection_strategy,
+        )
         image_name = safe_name(page_stem)
         for index, box in enumerate(boxes, start=1):
             crop = refine_output_photo(
@@ -83,6 +90,7 @@ def process_source_for_cli(args: tuple[Any, ...]) -> dict[str, Any]:
         skew_min_score_gain,
         auto_face_rotate,
         background_mode,
+        detection_strategy,
         include_root_name,
     ) = args
     try:
@@ -99,6 +107,7 @@ def process_source_for_cli(args: tuple[Any, ...]) -> dict[str, Any]:
             skew_min_score_gain=skew_min_score_gain,
             auto_face_rotate=auto_face_rotate,
             background_mode=background_mode,
+            detection_strategy=str(detection_strategy),
             include_root_name=bool(include_root_name),
         )
         return {

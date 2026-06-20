@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import importlib
+import base64
 import gc
+import html
 import io
+import os
 import socket
 import sys
 import tempfile
@@ -16,9 +18,17 @@ from urllib.parse import quote
 from urllib.request import urlopen
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
-from werkzeug.serving import make_server
+from PIL import Image
 
-from photo_splitter.config import BACKGROUND_MODES, DEFAULT_BACKGROUND_MODE, DEFAULT_PRESET_KEY, JPEG_QUALITY, PROCESSING_PRESETS
+from photo_splitter.config import (
+    BACKGROUND_MODES,
+    DEFAULT_BACKGROUND_MODE,
+    DEFAULT_DETECTION_STRATEGY,
+    DEFAULT_PRESET_KEY,
+    DETECTION_STRATEGIES,
+    JPEG_QUALITY,
+    PROCESSING_PRESETS,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -30,6 +40,12 @@ SINGLE_CACHE: dict[str, dict[str, Any]] = {}
 PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
 WEBVIEW_WINDOW: Any | None = None
 WEBVIEW_WINDOW_MAXIMIZED = False
+HTTP_SERVER: Any | None = None
+HTTP_SERVER_THREAD: threading.Thread | None = None
+MAIN_WINDOW_WIDTH = 1560
+MAIN_WINDOW_HEIGHT = 1020
+SPLASH_WINDOW_WIDTH = 560
+SPLASH_WINDOW_HEIGHT = 320
 
 
 def resource_path(relative_path: str) -> Path:
@@ -39,6 +55,130 @@ def resource_path(relative_path: str) -> Path:
 
 WEB_STATIC = resource_path("photo_splitter/web_ui/dist")
 app = Flask(__name__, static_folder=str(WEB_STATIC), static_url_path="")
+
+STARTUP_HTML = """
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>照片分割器正在加载</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      background: #0b1018;
+      color: #e7edf5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 28% 24%, rgba(61, 155, 255, 0.18), transparent 30%),
+        linear-gradient(135deg, #0b1018, #0d1118 46%, #070b11);
+    }
+    .shell {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      -webkit-app-region: drag;
+    }
+    .panel {
+      width: min(500px, calc(100vw - 48px));
+      padding: 28px 30px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 28px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.05)), rgba(18, 24, 34, 0.72);
+      box-shadow: 0 28px 80px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.2);
+      backdrop-filter: blur(24px) saturate(1.35);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .brand img {
+      width: 46px;
+      height: 46px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+    p {
+      margin: 8px 0 0;
+      color: #9da8b7;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .track {
+      height: 10px;
+      margin-top: 26px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.12);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.35);
+    }
+    .track i {
+      display: block;
+      width: 38%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #56b6ff, #3d9bff, #8ad8ff);
+      box-shadow: 0 0 20px rgba(61, 155, 255, 0.58);
+      animation: flow 1.2s ease-in-out infinite;
+    }
+    @keyframes flow {
+      from { transform: translateX(-120%); }
+      to { transform: translateX(280%); }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell window-drag">
+    <section class="panel">
+      <div class="brand">
+        <img src="__ICON_SRC__" alt="">
+        <div>
+          <h1>照片分割器</h1>
+          <p>正在加载本地处理服务和界面资源...</p>
+        </div>
+      </div>
+      <div class="track"><i></i></div>
+      <p>首次打开可能需要等待 EXE 解压和系统安全扫描。</p>
+    </section>
+  </main>
+</body>
+</html>
+"""
+
+
+def startup_html() -> str:
+    """生成无需依赖本地 HTTP 服务的启动页，保证主界面加载前窗口先出现。"""
+    try:
+        icon_bytes = resource_path("photo_splitter/assets/photo_splitter_icon_preview.png").read_bytes()
+        icon_src = "data:image/png;base64," + base64.b64encode(icon_bytes).decode("ascii")
+    except Exception:
+        icon_src = ""
+    return STARTUP_HTML.replace("__ICON_SRC__", icon_src)
+
+
+def startup_error_html(message: str) -> str:
+    """启动失败时仍在程序窗口内展示错误，避免用户只看到空白窗口。"""
+    safe_message = html.escape(message)
+    return startup_html().replace(
+        "正在加载本地处理服务和界面资源...",
+        f"加载失败：{safe_message}",
+    ).replace(
+        "首次打开可能需要等待 EXE 解压和系统安全扫描。",
+        "请关闭窗口后重新打开；如果持续失败，请把 gui_startup.log 发给 CODEX 检查。",
+    )
 
 
 def preset_payload() -> list[dict[str, Any]]:
@@ -52,6 +192,8 @@ def preset_payload() -> list[dict[str, Any]]:
             "white_threshold": preset.white_threshold,
             "background_mode": preset.background_mode,
             "skew_gain_percent": preset.skew_gain_percent,
+            "detection_strategy": preset.detection_strategy,
+            "split_strategy": preset.split_strategy,
         }
         for key, preset in PROCESSING_PRESETS.items()
     ]
@@ -64,6 +206,14 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     background_mode = str(payload.get("background_mode") or preset.background_mode or DEFAULT_BACKGROUND_MODE)
     if background_mode not in BACKGROUND_MODES:
         background_mode = DEFAULT_BACKGROUND_MODE
+    detection_strategy = str(
+        payload.get("detection_strategy")
+        or payload.get("split_strategy")
+        or preset.detection_strategy
+        or DEFAULT_DETECTION_STRATEGY
+    )
+    if detection_strategy not in DETECTION_STRATEGIES:
+        detection_strategy = DEFAULT_DETECTION_STRATEGY
     return {
         "preset": preset.key,
         "preset_name": preset.name,
@@ -71,6 +221,8 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "min_area_ratio": float(payload.get("min_area_ratio", preset.min_area_ratio)),
         "white_threshold": int(payload.get("white_threshold", preset.white_threshold)),
         "background_mode": background_mode,
+        "detection_strategy": detection_strategy,
+        "split_strategy": detection_strategy,
         "skew_min_score_gain": 1.0 + int(payload.get("skew_gain_percent", preset.skew_gain_percent)) / 100,
         "skew_gain_percent": int(payload.get("skew_gain_percent", preset.skew_gain_percent)),
         "auto_face_rotate": bool(payload.get("auto_face_rotate", False)),
@@ -169,7 +321,8 @@ def detected_item_payload(
     base.update(
         {
             "image_id": image_id,
-            "image_url": f"/api/single/image/{image_id}",
+            "image_url": f"/api/single/image/{image_id}?size=1600",
+            "full_image_url": f"/api/single/image/{image_id}?full=1",
             "thumb_url": thumb_url_for(source, page_stem, max_side=260),
             "page_stem": page_stem,
             "width": image.width,
@@ -190,6 +343,27 @@ def trim_preview_cache(limit: int = 60) -> None:
         return
     for key in list(PREVIEW_CACHE.keys())[:overflow]:
         PREVIEW_CACHE.pop(key, None)
+
+
+def release_accelerator_memory() -> None:
+    """任务结束后释放可回收的 GPU 缓存；界面缩略图和检测框数据不依赖这部分显存。"""
+    try:
+        from photo_splitter.runtime_backend import release_cupy_memory
+
+        release_cupy_memory()
+    except Exception:
+        pass
+
+
+def clear_detection_state(keep_recent_jobs: int = 3) -> None:
+    """开始新一轮检测前清理旧检测结果，避免确认页和历史任务越积越多。"""
+    SINGLE_CACHE.clear()
+    PREVIEW_CACHE.clear()
+    if len(JOBS) > keep_recent_jobs:
+        for key in list(JOBS.keys())[:-keep_recent_jobs]:
+            JOBS.pop(key, None)
+    gc.collect()
+    release_accelerator_memory()
 
 
 @app.get("/photo_splitter_icon_preview.png")
@@ -232,33 +406,8 @@ def api_config():
 def api_runtime():
     from photo_splitter.runtime_backend import detect_runtime_environment
 
-    return jsonify({"ok": True, "runtime": detect_runtime_environment()})
-
-
-def open_dialog(kind: str, title: str) -> str:
-    tk = importlib.import_module("tkinter")
-    filedialog = importlib.import_module("tkinter.filedialog")
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        if kind == "file":
-            return filedialog.askopenfilename(title=title, filetypes=[("图片文件", "*.jpg *.jpeg *.png *.tif *.tiff"), ("所有文件", "*.*")])
-        return filedialog.askdirectory(title=title)
-    finally:
-        root.destroy()
-
-
-@app.post("/api/dialog")
-def api_dialog():
-    payload = request.get_json(silent=True) or {}
-    kind = str(payload.get("kind") or "directory")
-    title = str(payload.get("title") or "选择路径")
-    if kind not in {"directory", "file"}:
-        return json_error("不支持的对话框类型。")
-    selected = open_dialog(kind, title)
-    return jsonify({"ok": True, "path": selected})
+    probe = str(request.args.get("probe") or "1").strip().lower() not in {"0", "false", "no"}
+    return jsonify({"ok": True, "runtime": detect_runtime_environment(probe_accelerators=probe)})
 
 
 @app.post("/api/open-path")
@@ -329,6 +478,13 @@ def api_batch_detect():
     if not images:
         return json_error("没有找到可处理的 JPG/PNG/TIFF 文件。")
     options = options_from_payload(payload.get("options") or {})
+    preserve_detection_state = bool(payload.get("preserve_detection_state"))
+    if preserve_detection_state:
+        PREVIEW_CACHE.clear()
+        gc.collect()
+        release_accelerator_memory()
+    else:
+        clear_detection_state()
     job_id = uuid.uuid4().hex
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
     JOBS[job_id] = {
@@ -365,6 +521,7 @@ def api_batch_detect():
                         int(options["dark_threshold"]),
                         float(options["min_area_ratio"]),
                         background_mode=str(options["background_mode"]),
+                        detection_strategy=str(options["detection_strategy"]),
                     )
                     image_id = cache_processed_image(source, page_stem, processed, boxes, options)
                     detected_items.append(detected_item_payload(source, input_root, page_stem, len(pages), image_id, processed, boxes))
@@ -387,6 +544,7 @@ def api_batch_detect():
         job["status"] = "done"
         job["items"] = detected_items or job["items"]
         job["logs"].append(f"批量检测完成，检测框 {job['saved']} 个。")
+        release_accelerator_memory()
 
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"ok": True, "job_id": job_id})
@@ -499,6 +657,7 @@ def api_batch_export():
         job = JOBS[job_id]
         job["status"] = "done"
         job["logs"].append(f"批量导出完成，输出 {job['saved']} 张。")
+        release_accelerator_memory()
 
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"ok": True, "job_id": job_id})
@@ -519,7 +678,8 @@ def api_batch_item_update():
         {
             "ok": True,
             "image_id": image_id,
-            "image_url": f"/api/single/image/{image_id}",
+            "image_url": f"/api/single/image/{image_id}?size=1600",
+            "full_image_url": f"/api/single/image/{image_id}?full=1",
             "width": int(item.get("width") or 1),
             "height": int(item.get("height") or 1),
             "boxes": [list(box) for box in boxes],
@@ -536,15 +696,17 @@ def api_job(job_id: str):
     return jsonify({"ok": True, "job": job})
 
 
-def image_to_response(image: Any, max_side: int | None = None):
+def image_to_response(image: Any, max_side: int | None = None, quality: int = 92):
     response_image = image.convert("RGB")
-    if max_side:
-        response_image = response_image.copy()
-        response_image.thumbnail((max_side, max_side))
-    buf = io.BytesIO()
-    response_image.save(buf, format="JPEG", quality=92)
-    buf.seek(0)
-    return send_file(buf, mimetype="image/jpeg")
+    try:
+        if max_side and max(response_image.size) > max_side:
+            response_image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        response_image.save(buf, format="JPEG", quality=quality, optimize=True)
+        buf.seek(0)
+        return send_file(buf, mimetype="image/jpeg")
+    finally:
+        response_image.close()
 
 
 @app.post("/api/single/preview")
@@ -570,7 +732,8 @@ def api_single_preview():
     return jsonify(
         {
             "ok": True,
-            "image_url": f"/api/source/preview/{preview_id}",
+            "image_url": f"/api/source/preview/{preview_id}?size=1600",
+            "full_image_url": f"/api/source/preview/{preview_id}?full=1",
             "name": source.name,
             "width": width,
             "height": height,
@@ -584,10 +747,22 @@ def api_source_preview(preview_id: str):
     if not item:
         return "not found", 404
     image = load_source_page_image(Path(str(item["source"])), str(item.get("page_stem") or ""))
-    response = image_to_response(image)
-    image.close()
-    gc.collect()
-    return response
+    try:
+        full = str(request.args.get("full") or "0").lower() in {"1", "true", "yes"}
+        if full:
+            max_side = None
+        else:
+            try:
+                max_side = max(720, min(2200, int(request.args.get("size") or 1600)))
+            except (TypeError, ValueError):
+                max_side = 1600
+        response = image_to_response(image, max_side=max_side, quality=88 if not full else 92)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    finally:
+        image.close()
+        gc.collect()
 
 
 @app.post("/api/single/detect")
@@ -600,6 +775,16 @@ def api_single_detect():
     if not source.exists():
         return json_error("单张照片不存在。")
     options = options_from_payload(payload.get("options") or {})
+    preserve_image_id = str(payload.get("preserve_image_id") or "").strip()
+    # 从批量预览进入单图修正后，重新检测当前图时必须保留整批检测缓存。
+    # 否则其它批量项的 image_id 会失效，后续确认导出会提示缓存不存在。
+    preserve_detection_state = bool(payload.get("preserve_detection_state")) or preserve_image_id in SINGLE_CACHE
+    if preserve_detection_state:
+        PREVIEW_CACHE.clear()
+        gc.collect()
+        release_accelerator_memory()
+    else:
+        clear_detection_state()
     pages = iter_source_images(source)
     if not pages:
         return json_error("单张照片没有可读取的页面。")
@@ -612,6 +797,7 @@ def api_single_detect():
         int(options["dark_threshold"]),
         float(options["min_area_ratio"]),
         background_mode=str(options["background_mode"]),
+        detection_strategy=str(options["detection_strategy"]),
     )
     image_id = cache_processed_image(source, page_stem, processed, boxes, options)
     width, height = processed.width, processed.height
@@ -619,11 +805,13 @@ def api_single_detect():
         processed.close()
     image.close()
     gc.collect()
+    release_accelerator_memory()
     return jsonify(
         {
             "ok": True,
             "image_id": image_id,
-            "image_url": f"/api/single/image/{image_id}",
+            "image_url": f"/api/single/image/{image_id}?size=1600",
+            "full_image_url": f"/api/single/image/{image_id}?full=1",
             "width": width,
             "height": height,
             "boxes": [list(box) for box in boxes],
@@ -637,11 +825,24 @@ def api_single_image(image_id: str):
     if not item:
         return "not found", 404
     image, should_close_image = image_for_cached_item(item)
-    response = image_to_response(image)
-    if should_close_image:
-        image.close()
+    try:
+        full = str(request.args.get("full") or "0").lower() in {"1", "true", "yes"}
+        if full:
+            max_side = None
+        else:
+            try:
+                max_side = max(720, min(2200, int(request.args.get("size") or 1600)))
+            except (TypeError, ValueError):
+                max_side = 1600
+
+        response = image_to_response(image, max_side=max_side, quality=88 if not full else 92)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    finally:
+        if should_close_image:
+            image.close()
         gc.collect()
-    return response
 
 
 @app.post("/api/single/export")
@@ -707,6 +908,7 @@ def api_single_export():
         if should_close_image:
             image.close()
         gc.collect()
+        release_accelerator_memory()
 
 
 @app.get("/<path:path>")
@@ -728,6 +930,54 @@ def set_windows_app_id() -> None:
         pass
 
 
+def configure_webview_runtime() -> None:
+    """限制 WebView2 自身占用 GPU，避免缩略图列表和玻璃效果被误认为 CUDA 计算负载。
+
+    这里禁用的是 Edge WebView2 的界面合成 GPU 加速，不影响 CuPy/OpenCV 对 CUDA 的调用。
+    """
+    if sys.platform != "win32":
+        return
+    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "").strip()
+    flags = [
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-accelerated-2d-canvas",
+    ]
+    merged = existing.split() if existing else []
+    for flag in flags:
+        if flag not in merged:
+            merged.append(flag)
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = " ".join(merged)
+
+
+def centered_window_position(width: int, height: int) -> tuple[int | None, int | None]:
+    """计算主窗口初始居中位置；Windows 下按可用工作区居中，避开任务栏。"""
+    if sys.platform != "win32":
+        return None, None
+    try:
+        import ctypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        work_area = RECT()
+        spi_get_workarea = 0x0030
+        if not ctypes.windll.user32.SystemParametersInfoW(spi_get_workarea, 0, ctypes.byref(work_area), 0):
+            return None, None
+        work_width = max(1, int(work_area.right - work_area.left))
+        work_height = max(1, int(work_area.bottom - work_area.top))
+        x = int(work_area.left + max(0, (work_width - width) // 2))
+        y = int(work_area.top + max(0, (work_height - height) // 2))
+        return x, y
+    except Exception:
+        return None, None
+
+
 def find_available_port(start: int = 8765, attempts: int = 20) -> int:
     for port in range(start, start + attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -738,6 +988,20 @@ def find_available_port(start: int = 8765, attempts: int = 20) -> int:
                 continue
             return port
     raise RuntimeError("没有可用的本地端口。")
+
+
+def start_http_server(port: int) -> None:
+    """在加载页已经显示后再启动 Flask 服务，缩短用户看到空白窗口的时间。"""
+    global HTTP_SERVER, HTTP_SERVER_THREAD
+
+    if HTTP_SERVER is not None:
+        return
+
+    from werkzeug.serving import make_server
+
+    HTTP_SERVER = make_server("127.0.0.1", port, app, threaded=True)
+    HTTP_SERVER_THREAD = threading.Thread(target=HTTP_SERVER.serve_forever, daemon=True)
+    HTTP_SERVER_THREAD.start()
 
 
 def wait_for_server(url: str, timeout: float = 45.0) -> None:
@@ -759,6 +1023,25 @@ def wait_for_server(url: str, timeout: float = 45.0) -> None:
     if last_error:
         raise RuntimeError(f"本地服务启动超时：{last_error}") from last_error
     raise RuntimeError("本地服务启动超时。")
+
+
+def load_application_when_ready(window: Any, url: str, port: int) -> None:
+    """pywebview 启动后再启动 Flask，并从加载页切换到正式界面。"""
+    try:
+        # 给 Edge WebView2 一个绘制首帧的时间，避免服务很快启动时看不到加载页。
+        time.sleep(0.2)
+        start_http_server(port)
+        wait_for_server(url)
+        main_x, main_y = centered_window_position(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
+        if main_x is not None and main_y is not None:
+            window.move(main_x, main_y)
+        window.resize(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
+        window.load_url(url)
+    except Exception as exc:
+        try:
+            window.load_html(startup_error_html(str(exc)))
+        except Exception:
+            pass
 
 
 def bind_webview_window(window: Any) -> None:
@@ -837,31 +1120,34 @@ class WindowControlsApi:
 
 def main() -> None:
     set_windows_app_id()
+    configure_webview_runtime()
     port = find_available_port()
     url = f"http://127.0.0.1:{port}"
-    http_server = make_server("127.0.0.1", port, app, threaded=True)
-    server = threading.Thread(target=http_server.serve_forever, daemon=True)
-    server.start()
-    wait_for_server(url)
 
     try:
         # pywebview/WebView2 的窗口初始化必须留在主线程，否则 Windows 下可能只渲染界面但不响应鼠标键盘。
         import webview
     except Exception:
+        start_http_server(port)
+        wait_for_server(url)
         webbrowser.open(url)
-        server.join()
+        if HTTP_SERVER_THREAD:
+            HTTP_SERVER_THREAD.join()
         return
 
     webview.settings["DRAG_REGION_SELECTOR"] = ".window-drag"
     webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = False
     window_api = WindowControlsApi()
+    initial_x, initial_y = centered_window_position(SPLASH_WINDOW_WIDTH, SPLASH_WINDOW_HEIGHT)
     window = webview.create_window(
         "照片分割器",
-        url,
+        html=startup_html(),
         js_api=window_api,
-        width=1560,
-        height=1020,
-        min_size=(1400, 920),
+        width=SPLASH_WINDOW_WIDTH,
+        height=SPLASH_WINDOW_HEIGHT,
+        x=initial_x,
+        y=initial_y,
+        min_size=(SPLASH_WINDOW_WIDTH, SPLASH_WINDOW_HEIGHT),
         resizable=True,
         frameless=True,
         easy_drag=False,
@@ -870,9 +1156,10 @@ def main() -> None:
     )
     bind_webview_window(window)
     try:
-        webview.start(gui="edgechromium")
+        webview.start(load_application_when_ready, args=(window, url, port), gui="edgechromium")
     finally:
-        http_server.shutdown()
+        if HTTP_SERVER is not None:
+            HTTP_SERVER.shutdown()
 
 
 if __name__ == "__main__":
