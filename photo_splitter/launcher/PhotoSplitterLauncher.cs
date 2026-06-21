@@ -13,6 +13,7 @@ using System.Windows.Forms;
 internal static class PhotoSplitterLauncher
 {
     public const string PayloadResourceName = "PhotoSplitterPayload";
+    public const string IconResourceName = "PhotoSplitterIconPreview";
 
     [STAThread]
     private static void Main(string[] args)
@@ -157,10 +158,12 @@ internal sealed class SplashForm : Form
     private Process _process;
     private DateTime _targetStartedAt;
     private string _status = "正在启动主程序...";
+    private Image _iconImage;
 
     public SplashForm(string[] args)
     {
         _args = args ?? new string[0];
+        _iconImage = LoadIconImage();
         Width = 560;
         Height = 320;
         MinimumSize = Size;
@@ -198,6 +201,23 @@ internal sealed class SplashForm : Form
 
         _timer = new System.Windows.Forms.Timer { Interval = 33 };
         _timer.Tick += OnTick;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            if (_timer != null)
+            {
+                _timer.Dispose();
+            }
+            if (_iconImage != null)
+            {
+                _iconImage.Dispose();
+                _iconImage = null;
+            }
+        }
+        base.Dispose(disposing);
     }
 
     protected override CreateParams CreateParams
@@ -371,11 +391,33 @@ internal sealed class SplashForm : Form
 
     private void DrawIcon(Graphics g, int x, int y)
     {
+        Rectangle target = new Rectangle(x, y, 48, 48);
+        if (_iconImage != null)
+        {
+            InterpolationMode oldInterpolation = g.InterpolationMode;
+            PixelOffsetMode oldPixelOffset = g.PixelOffsetMode;
+            CompositingQuality oldCompositing = g.CompositingQuality;
+            try
+            {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.CompositingQuality = CompositingQuality.HighQuality;
+                g.DrawImage(_iconImage, target);
+                return;
+            }
+            finally
+            {
+                g.InterpolationMode = oldInterpolation;
+                g.PixelOffsetMode = oldPixelOffset;
+                g.CompositingQuality = oldCompositing;
+            }
+        }
+
         try
         {
             using (Icon icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
             {
-                g.DrawIcon(icon, new Rectangle(x, y, 48, 48));
+                g.DrawIcon(icon, target);
             }
         }
         catch
@@ -384,6 +426,29 @@ internal sealed class SplashForm : Form
             {
                 g.FillEllipse(brush, x, y, 48, 48);
             }
+        }
+    }
+
+    private static Image LoadIconImage()
+    {
+        try
+        {
+            Assembly assembly = Assembly.GetExecutingAssembly();
+            using (Stream source = assembly.GetManifestResourceStream(PhotoSplitterLauncher.IconResourceName))
+            {
+                if (source == null)
+                {
+                    return null;
+                }
+                using (Image loaded = Image.FromStream(source))
+                {
+                    return new Bitmap(loaded);
+                }
+            }
+        }
+        catch
+        {
+            return null;
         }
     }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import gc
 import html
 import io
@@ -46,6 +47,7 @@ MAIN_WINDOW_WIDTH = 1560
 MAIN_WINDOW_HEIGHT = 1020
 SPLASH_WINDOW_WIDTH = 560
 SPLASH_WINDOW_HEIGHT = 320
+ORIENTATION_DETECTOR_LOCK = threading.Lock()
 
 
 def resource_path(relative_path: str) -> Path:
@@ -99,12 +101,24 @@ STARTUP_HTML = """
     .brand {
       display: flex;
       align-items: center;
-      gap: 14px;
+      gap: 18px;
       margin-bottom: 24px;
     }
-    .brand img {
-      width: 46px;
-      height: 46px;
+    .brand-icon {
+      width: 72px;
+      height: 72px;
+      flex: 0 0 72px;
+      display: block;
+    }
+    .brand-icon svg {
+      display: block;
+      width: 72px;
+      height: 72px;
+    }
+    .brand-icon img {
+      display: block;
+      width: 72px;
+      height: 72px;
     }
     h1 {
       margin: 0;
@@ -144,7 +158,7 @@ STARTUP_HTML = """
   <main class="shell window-drag">
     <section class="panel">
       <div class="brand">
-        <img src="__ICON_SRC__" alt="">
+        <div class="brand-icon" aria-hidden="true">__ICON_MARKUP__</div>
         <div>
           <h1>照片分割器</h1>
           <p>正在加载本地处理服务和界面资源...</p>
@@ -162,11 +176,15 @@ STARTUP_HTML = """
 def startup_html() -> str:
     """生成无需依赖本地 HTTP 服务的启动页，保证主界面加载前窗口先出现。"""
     try:
-        icon_bytes = resource_path("photo_splitter/assets/photo_splitter_icon_preview.png").read_bytes()
-        icon_src = "data:image/png;base64," + base64.b64encode(icon_bytes).decode("ascii")
+        icon_markup = resource_path("photo_splitter/assets/photo_splitter_icon.svg").read_text(encoding="utf-8")
     except Exception:
-        icon_src = ""
-    return STARTUP_HTML.replace("__ICON_SRC__", icon_src)
+        try:
+            icon_bytes = resource_path("photo_splitter/assets/photo_splitter_icon_preview.png").read_bytes()
+            icon_src = "data:image/png;base64," + base64.b64encode(icon_bytes).decode("ascii")
+            icon_markup = f'<img src="{icon_src}" alt="">'
+        except Exception:
+            icon_markup = ""
+    return STARTUP_HTML.replace("__ICON_MARKUP__", icon_markup)
 
 
 def startup_error_html(message: str) -> str:
@@ -225,13 +243,112 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "split_strategy": detection_strategy,
         "skew_min_score_gain": 1.0 + int(payload.get("skew_gain_percent", preset.skew_gain_percent)) / 100,
         "skew_gain_percent": int(payload.get("skew_gain_percent", preset.skew_gain_percent)),
-        "auto_face_rotate": bool(payload.get("auto_face_rotate", False)),
+        "auto_face_rotate": bool(payload.get("auto_face_rotate", True)),
         "save_split_preview": bool(payload.get("save_split_preview", False)),
     }
 
 
 def json_error(message: str, status: int = 400):
     return jsonify({"ok": False, "error": message}), status
+
+
+ROTATION_MARKERS = {0, 90, 180, 270}
+ORIENTATION_CONFIDENCE_THRESHOLD = 0.30
+
+
+def normalize_rotation_marker(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        marker = int(value)
+    except (TypeError, ValueError):
+        return None
+    return marker if marker in ROTATION_MARKERS else None
+
+
+def box_coords(box: Any) -> tuple[int, int, int, int]:
+    values = list(box or [])
+    if len(values) < 4:
+        raise ValueError("检测框坐标不完整。")
+    return tuple(int(round(float(values[index]))) for index in range(4))
+
+
+def box_payload(box: Any) -> list[int | float | str | bool | None]:
+    values = list(box or [])
+    x1, y1, x2, y2 = box_coords(values)
+    marker = normalize_rotation_marker(values[4] if len(values) > 4 else None)
+    confidence = values[5] if len(values) > 5 and values[5] is not None else None
+    method = str(values[6]) if len(values) > 6 and values[6] is not None else None
+    auto_checked = bool(values[7]) if len(values) > 7 else False
+    manual_changed = bool(values[8]) if len(values) > 8 else False
+    return [x1, y1, x2, y2, marker, confidence, method, auto_checked, manual_changed]
+
+
+def marker_to_export_rotation(rotation_marker: int | None) -> int:
+    marker = normalize_rotation_marker(rotation_marker)
+    if marker is None:
+        return 0
+    return {0: 0, 90: 270, 180: 180, 270: 90}[marker]
+
+
+def export_rotation_to_marker(export_rotation: int) -> int:
+    return {0: 0, 90: 270, 180: 180, 270: 90}[int(export_rotation) % 360]
+
+
+def rotate_pil_by_export_angle(image: Image.Image, angle: int) -> Image.Image:
+    angle = int(angle) % 360
+    if angle == 0:
+        return image
+    if angle == 90:
+        return image.transpose(Image.Transpose.ROTATE_270)
+    if angle == 180:
+        return image.transpose(Image.Transpose.ROTATE_180)
+    if angle == 270:
+        return image.transpose(Image.Transpose.ROTATE_90)
+    raise ValueError("旋转角度必须是 0/90/180/270。")
+
+
+def apply_rotation_marker(image: Image.Image, rotation_marker: int | None) -> Image.Image:
+    return rotate_pil_by_export_angle(image, marker_to_export_rotation(rotation_marker))
+
+
+def apply_orientation_detection_after_boxes(
+    image: Image.Image,
+    boxes: list[Any],
+    enabled: bool,
+    confidence_threshold: float = ORIENTATION_CONFIDENCE_THRESHOLD,
+) -> list[list[int | float | str | bool | None]]:
+    """在分割框生成后逐框裁切判断方向，只记录 marker，不修改预览图。"""
+    result_boxes: list[list[int | float | str | bool | None]] = []
+    predictor = None
+    if enabled:
+        from photo_splitter.postprocess import predict_face_orientation
+
+        predictor = predict_face_orientation
+    for box in boxes:
+        x1, y1, x2, y2 = box_coords(box)
+        marker: int | None = None
+        confidence: float | None = None
+        method: str | None = None
+        face_count = 0
+        auto_checked = False
+        if predictor is not None:
+            clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
+            if clamped[2] - clamped[0] >= 5 and clamped[3] - clamped[1] >= 5:
+                crop = image.crop(clamped)
+                try:
+                    with ORIENTATION_DETECTOR_LOCK:
+                        prediction = predictor(crop)
+                    confidence = float(prediction.confidence)
+                    method = str(prediction.method)
+                    face_count = int(prediction.face_count)
+                    auto_checked = True
+                    if face_count > 0 and confidence >= confidence_threshold and int(prediction.angle) % 360 != 0:
+                        marker = export_rotation_to_marker((360 - int(prediction.angle)) % 360)
+                finally:
+                    crop.close()
+        result_boxes.append([x1, y1, x2, y2, marker, confidence, method, auto_checked, False])
+    return result_boxes
 
 
 def thumb_url_for(path: Path, page_stem: str | None = None, max_side: int = 360) -> str:
@@ -282,7 +399,7 @@ def load_source_page_image(source: Path, page_stem: str | None = None) -> Any:
     return pages[selected_index][1]
 
 
-def cache_processed_image(source: Path, page_stem: str, image: Any, boxes: list[tuple[int, int, int, int]], options: dict[str, Any]) -> str:
+def cache_processed_image(source: Path, page_stem: str, image: Any, boxes: list[Any], options: dict[str, Any]) -> str:
     """只缓存检测结果元数据，不缓存大图；图片在点击预览或导出时按需重读。"""
     image_id = uuid.uuid4().hex
     SINGLE_CACHE[image_id] = {
@@ -290,7 +407,7 @@ def cache_processed_image(source: Path, page_stem: str, image: Any, boxes: list[
         "page_stem": page_stem,
         "width": image.width,
         "height": image.height,
-        "boxes": boxes,
+        "boxes": [box_payload(box) for box in boxes],
         "options": options,
     }
     return image_id
@@ -311,7 +428,7 @@ def detected_item_payload(
     page_count: int,
     image_id: str,
     image: Any,
-    boxes: list[tuple[int, int, int, int]],
+    boxes: list[Any],
     status: str = "已检测",
 ) -> dict[str, Any]:
     """生成批量检测预览数据；只保存检测框和尺寸，图片点开时再按需读取。"""
@@ -328,7 +445,7 @@ def detected_item_payload(
             "page_stem": page_stem,
             "width": image.width,
             "height": image.height,
-            "boxes": [list(box) for box in boxes],
+            "boxes": [box_payload(box) for box in boxes],
             "box_count": len(boxes),
             "saved": len(boxes),
             "edited": False,
@@ -354,6 +471,50 @@ def release_accelerator_memory() -> None:
         release_cupy_memory()
     except Exception:
         pass
+
+
+def worker_override_from_env(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def batch_worker_count(kind: str, total: int) -> tuple[int, str]:
+    """按当前计算后端选择批处理并发度，避免 GPU 后端被过度并发拖慢。"""
+    if total <= 1:
+        return 1, "single-item"
+    env_name = "PHOTO_SPLITTER_DETECT_WORKERS" if kind == "detect" else "PHOTO_SPLITTER_EXPORT_WORKERS"
+    override = worker_override_from_env(env_name)
+    if override is not None:
+        return max(1, min(total, override)), f"{env_name}={override}"
+
+    cpu_count = max(1, os.cpu_count() or 1)
+    try:
+        from photo_splitter.runtime_backend import get_compute_backend
+
+        backend = get_compute_backend()
+    except Exception:
+        backend = "unknown"
+
+    if kind == "detect":
+        if backend in {"cupy-cuda", "opencv-cuda"}:
+            return 1, backend
+        if backend == "opencv-opencl":
+            return min(total, 2), backend
+        if backend == "opencv-cpu":
+            return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
+        return min(total, max(2, min(3, cpu_count // 2 or 1))), backend
+
+    if backend in {"cupy-cuda", "opencv-cuda"}:
+        return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
+    if backend == "opencv-opencl":
+        return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
+    return min(total, max(2, min(6, cpu_count // 2 or 1))), backend
 
 
 def clear_detection_state(keep_recent_jobs: int = 3) -> None:
@@ -480,6 +641,10 @@ def api_batch_detect():
         return json_error("没有找到可处理的 JPG/PNG/TIFF 文件。")
     options = options_from_payload(payload.get("options") or {})
     preserve_detection_state = bool(payload.get("preserve_detection_state"))
+    waiting_status = "等待重新检测" if preserve_detection_state else "待处理"
+    running_status = "重新检测中" if preserve_detection_state else "处理中"
+    done_status = "已重新检测" if preserve_detection_state else "已检测"
+    action_label = "重新检测" if preserve_detection_state else "检测"
     if preserve_detection_state:
         PREVIEW_CACHE.clear()
         gc.collect()
@@ -497,8 +662,8 @@ def api_batch_detect():
         "saved": 0,
         "failed": [],
         "output_dir": str(output_path),
-        "items": [scan_item_payload(path, input_root) for path in images],
-        "logs": [f"开始批量检测 {len(images)} 个文件。"],
+        "items": [scan_item_payload(path, input_root, status=waiting_status) for path in images],
+        "logs": [f"开始批量{action_label} {len(images)} 个文件。"],
         "started_at": time.time(),
     }
 
@@ -506,16 +671,14 @@ def api_batch_detect():
         from photo_splitter.detection import split_image
         from photo_splitter.io_utils import iter_source_images
 
-        detected_items: list[dict[str, Any]] = []
-        # 检测阶段只缓存处理图和检测框，不提前写输出文件。
-        for index, source in enumerate(images, start=1):
-            job = JOBS[job_id]
-            job["index"] = index
-            job["items"][index - 1]["status"] = "处理中"
-            job["logs"].append(f"正在检测：{source.name}")
+        def detect_source(index: int, source: Path) -> dict[str, Any]:
+            job = JOBS.get(job_id)
+            if job:
+                job["items"][index - 1]["status"] = running_status
             try:
                 pages = iter_source_images(source)
                 file_box_count = 0
+                item_results: list[dict[str, Any]] = []
                 for page_stem, image in pages:
                     processed, boxes, _angle = split_image(
                         image,
@@ -524,23 +687,53 @@ def api_batch_detect():
                         background_mode=str(options["background_mode"]),
                         detection_strategy=str(options["detection_strategy"]),
                     )
-                    image_id = cache_processed_image(source, page_stem, processed, boxes, options)
-                    detected_items.append(detected_item_payload(source, input_root, page_stem, len(pages), image_id, processed, boxes))
-                    file_box_count += len(boxes)
+                    marked_boxes = apply_orientation_detection_after_boxes(processed, boxes, bool(options["auto_face_rotate"]))
+                    image_id = cache_processed_image(source, page_stem, processed, marked_boxes, options)
+                    item_results.append(detected_item_payload(source, input_root, page_stem, len(pages), image_id, processed, marked_boxes, status=done_status))
+                    file_box_count += len(marked_boxes)
                     if processed is not image:
                         processed.close()
                     image.close()
                 pages.clear()
                 gc.collect()
-                job["saved"] += file_box_count
-                job["items"][index - 1]["status"] = "已检测"
-                job["items"][index - 1]["saved"] = file_box_count
-                job["logs"].append(f"检测完成：{source.name}，检测框 {file_box_count} 个。")
+                return {"ok": True, "index": index, "source": source, "items": item_results, "box_count": file_box_count}
             except Exception as exc:
-                error = str(exc)
-                job["items"][index - 1]["status"] = "失败"
-                job["failed"].append({"source": str(source), "error": error})
-                job["logs"].append(f"失败：{source.name}，{error}")
+                return {"ok": False, "index": index, "source": source, "error": str(exc)}
+
+        detected_by_index: dict[int, list[dict[str, Any]]] = {}
+        workers, backend_note = batch_worker_count("detect", len(images))
+        job = JOBS[job_id]
+        job["logs"].append(f"{action_label}并发：{workers} 个 worker（后端：{backend_note}）。")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = []
+            for index, source in enumerate(images, start=1):
+                job["items"][index - 1]["status"] = waiting_status
+                job["logs"].append(f"排队{action_label}：{source.name}")
+                futures.append(executor.submit(detect_source, index, source))
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                result = future.result()
+                result_index = int(result["index"])
+                source = Path(result["source"])
+                job = JOBS[job_id]
+                job["index"] = completed
+                if result["ok"]:
+                    box_count = int(result["box_count"])
+                    detected_by_index[result_index] = list(result["items"])
+                    job["saved"] += box_count
+                    job["items"][result_index - 1]["status"] = done_status
+                    job["items"][result_index - 1]["saved"] = box_count
+                    job["logs"].append(f"{action_label}完成：{source.name}，检测框 {box_count} 个。")
+                else:
+                    error = str(result["error"])
+                    job["items"][result_index - 1]["status"] = "失败"
+                    job["failed"].append({"source": str(source), "error": error})
+                    job["logs"].append(f"失败：{source.name}，{error}")
+
+        detected_items: list[dict[str, Any]] = []
+        for index in range(1, len(images) + 1):
+            detected_items.extend(detected_by_index.get(index, []))
         job = JOBS[job_id]
         job["status"] = "done"
         job["items"] = detected_items or job["items"]
@@ -593,18 +786,16 @@ def api_batch_export():
         from photo_splitter.visualization import draw_preview_box
 
         output_path.mkdir(parents=True, exist_ok=True)
-        for index, item_payload in enumerate(items, start=1):
-            job = JOBS[job_id]
-            job["index"] = index
-            job["items"][index - 1]["status"] = "处理中"
+
+        def export_item(index: int, item_payload: dict[str, Any]) -> dict[str, Any]:
+            job = JOBS.get(job_id)
+            if job:
+                job["items"][index - 1]["status"] = "处理中"
             image_id = str(item_payload.get("image_id") or "")
             cache_item = SINGLE_CACHE.get(image_id)
             if not cache_item:
                 error = "检测缓存不存在，请重新批量检测。"
-                job["items"][index - 1]["status"] = "失败"
-                job["failed"].append({"source": str(item_payload.get("path") or ""), "error": error})
-                job["logs"].append(f"失败：{item_payload.get('name') or image_id}，{error}")
-                continue
+                return {"ok": False, "index": index, "name": item_payload.get("name") or image_id, "source": str(item_payload.get("path") or ""), "error": error}
             image = None
             should_close_image = False
             try:
@@ -612,25 +803,28 @@ def api_batch_export():
                 source = Path(str(cache_item["source"]))
                 page_stem = str(cache_item.get("page_stem") or source.stem)
                 item_options = options_from_payload(item_payload.get("options") or cache_item.get("options") or options)
-                boxes = [tuple(int(v) for v in box) for box in item_payload.get("boxes", [])]
+                boxes = [box_payload(box) for box in item_payload.get("boxes", [])]
                 target_dir = target_dir_for_source(source, input_root, output_path, include_root_name=True)
                 target_dir.mkdir(parents=True, exist_ok=True)
                 image_name = safe_name(page_stem)
                 saved: list[Path] = []
                 for box_index, box in enumerate(boxes, start=1):
-                    x1, y1, x2, y2 = box
+                    x1, y1, x2, y2, rotation_marker = box[:5]
                     clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
                     if clamped[2] - clamped[0] < 5 or clamped[3] - clamped[1] < 5:
                         continue
                     raw_crop = image.crop(clamped)
+                    oriented_crop = apply_rotation_marker(raw_crop, rotation_marker)
                     crop = refine_output_photo(
-                        raw_crop,
+                        oriented_crop,
                         white_threshold=int(item_options["white_threshold"]),
                         skew_min_score_gain=float(item_options["skew_min_score_gain"]),
-                        auto_face_rotate=bool(item_options["auto_face_rotate"]),
+                        auto_face_rotate=False,
                         background_mode=str(item_options["background_mode"]),
                     )
-                    if crop is not raw_crop:
+                    if crop is not oriented_crop:
+                        oriented_crop.close()
+                    if oriented_crop is not raw_crop:
                         raw_crop.close()
                     target = unique_output_path(target_dir / f"{image_name}_{box_index:03d}.jpg", overwrite=False)
                     crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
@@ -640,23 +834,56 @@ def api_batch_export():
                     preview = image.copy()
                     draw = ImageDraw.Draw(preview)
                     for box_index, box in enumerate(boxes, start=1):
-                        draw_preview_box(draw, tuple(box), f"{box_index:03d}", image.width)
+                        draw_preview_box(draw, tuple(box[:4]), f"{box_index:03d}", image.width)
                     preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
                     preview.save(preview_path, "JPEG", quality=92)
                     preview.close()
-                job["saved"] += len(saved)
-                job["items"][index - 1]["status"] = "已完成"
-                job["items"][index - 1]["saved"] = len(saved)
-                job["logs"].append(f"导出完成：{item_payload.get('name') or source.name}，输出 {len(saved)} 张。")
+                return {
+                    "ok": True,
+                    "index": index,
+                    "name": item_payload.get("name") or source.name,
+                    "source": str(source),
+                    "saved": len(saved),
+                }
             except Exception as exc:
-                error = str(exc)
-                job["items"][index - 1]["status"] = "失败"
-                job["failed"].append({"source": str(item_payload.get("path") or ""), "error": error})
-                job["logs"].append(f"失败：{item_payload.get('name') or image_id}，{error}")
+                return {
+                    "ok": False,
+                    "index": index,
+                    "name": item_payload.get("name") or image_id,
+                    "source": str(item_payload.get("path") or ""),
+                    "error": str(exc),
+                }
             finally:
                 if should_close_image and image is not None:
                     image.close()
                 gc.collect()
+
+        workers, backend_note = batch_worker_count("export", len(items))
+        job = JOBS[job_id]
+        job["logs"].append(f"导出并发：{workers} 个 worker（后端：{backend_note}）。")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = []
+            for index, item_payload in enumerate(items, start=1):
+                job["items"][index - 1]["status"] = "待导出"
+                futures.append(executor.submit(export_item, index, item_payload))
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                result = future.result()
+                result_index = int(result["index"])
+                job = JOBS[job_id]
+                job["index"] = completed
+                if result["ok"]:
+                    saved_count = int(result["saved"])
+                    job["saved"] += saved_count
+                    job["items"][result_index - 1]["status"] = "已完成"
+                    job["items"][result_index - 1]["saved"] = saved_count
+                    job["logs"].append(f"导出完成：{result['name']}，输出 {saved_count} 张。")
+                else:
+                    error = str(result["error"])
+                    job["items"][result_index - 1]["status"] = "失败"
+                    job["failed"].append({"source": str(result["source"]), "error": error})
+                    job["logs"].append(f"失败：{result['name']}，{error}")
         job = JOBS[job_id]
         job["status"] = "done"
         job["logs"].append(f"批量导出完成，输出 {job['saved']} 张。")
@@ -673,7 +900,7 @@ def api_batch_item_update():
     item = SINGLE_CACHE.get(image_id)
     if not item:
         return json_error("检测缓存不存在，请重新检测。")
-    boxes = [tuple(int(v) for v in box) for box in payload.get("boxes", [])]
+    boxes = [box_payload(box) for box in payload.get("boxes", [])]
     options = options_from_payload(payload.get("options") or item.get("options") or {})
     item["boxes"] = boxes
     item["options"] = options
@@ -685,7 +912,7 @@ def api_batch_item_update():
             "full_image_url": f"/api/single/image/{image_id}?full=1",
             "width": int(item.get("width") or 1),
             "height": int(item.get("height") or 1),
-            "boxes": [list(box) for box in boxes],
+            "boxes": [box_payload(box) for box in boxes],
             "box_count": len(boxes),
         }
     )
@@ -802,7 +1029,8 @@ def api_single_detect():
         background_mode=str(options["background_mode"]),
         detection_strategy=str(options["detection_strategy"]),
     )
-    image_id = cache_processed_image(source, page_stem, processed, boxes, options)
+    marked_boxes = apply_orientation_detection_after_boxes(processed, boxes, bool(options["auto_face_rotate"]))
+    image_id = cache_processed_image(source, page_stem, processed, marked_boxes, options)
     width, height = processed.width, processed.height
     if processed is not image:
         processed.close()
@@ -817,7 +1045,7 @@ def api_single_detect():
             "full_image_url": f"/api/single/image/{image_id}?full=1",
             "width": width,
             "height": height,
-            "boxes": [list(box) for box in boxes],
+            "boxes": [box_payload(box) for box in marked_boxes],
         }
     )
 
@@ -870,22 +1098,25 @@ def api_single_export():
     image, should_close_image = image_for_cached_item(item)
     try:
         source_name = safe_name(Path(str(item["source"])).stem or "single_photo")
-        boxes = [tuple(int(v) for v in box) for box in payload.get("boxes", [])]
+        boxes = [box_payload(box) for box in payload.get("boxes", [])]
         saved: list[Path] = []
         for index, box in enumerate(boxes, start=1):
-            x1, y1, x2, y2 = box
+            x1, y1, x2, y2, rotation_marker = box[:5]
             clamped = (max(0, x1), max(0, y1), min(image.width, x2), min(image.height, y2))
             if clamped[2] - clamped[0] < 5 or clamped[3] - clamped[1] < 5:
                 continue
             raw_crop = image.crop(clamped)
+            oriented_crop = apply_rotation_marker(raw_crop, rotation_marker)
             crop = refine_output_photo(
-                raw_crop,
+                oriented_crop,
                 white_threshold=int(options["white_threshold"]),
                 skew_min_score_gain=float(options["skew_min_score_gain"]),
-                auto_face_rotate=bool(options["auto_face_rotate"]),
+                auto_face_rotate=False,
                 background_mode=str(options["background_mode"]),
             )
-            if crop is not raw_crop:
+            if crop is not oriented_crop:
+                oriented_crop.close()
+            if oriented_crop is not raw_crop:
                 raw_crop.close()
             target = unique_output_path(output_dir / f"{source_name}_manual_{index:03d}.jpg", overwrite=False)
             crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
@@ -896,7 +1127,7 @@ def api_single_export():
             preview = image.copy()
             draw = ImageDraw.Draw(preview)
             for index, box in enumerate(boxes, start=1):
-                draw_preview_box(draw, tuple(box), f"{index:03d}", image.width)
+                draw_preview_box(draw, tuple(box[:4]), f"{index:03d}", image.width)
             preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
             preview.save(preview_path, "JPEG", quality=92)
             preview.close()
@@ -1037,10 +1268,6 @@ def load_application_when_ready(window: Any, url: str, port: int) -> None:
         time.sleep(0.2)
         start_http_server(port)
         wait_for_server(url)
-        main_x, main_y = centered_window_position(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
-        if main_x is not None and main_y is not None:
-            window.move(main_x, main_y)
-        window.resize(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
         window.load_url(url)
     except Exception as exc:
         try:
@@ -1143,16 +1370,16 @@ def main() -> None:
     webview.settings["DRAG_REGION_SELECTOR"] = ".window-drag"
     webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = False
     window_api = WindowControlsApi()
-    initial_x, initial_y = centered_window_position(SPLASH_WINDOW_WIDTH, SPLASH_WINDOW_HEIGHT)
+    initial_x, initial_y = centered_window_position(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT)
     window = webview.create_window(
         "照片分割器",
         html=startup_html(),
         js_api=window_api,
-        width=SPLASH_WINDOW_WIDTH,
-        height=SPLASH_WINDOW_HEIGHT,
+        width=MAIN_WINDOW_WIDTH,
+        height=MAIN_WINDOW_HEIGHT,
         x=initial_x,
         y=initial_y,
-        min_size=(SPLASH_WINDOW_WIDTH, SPLASH_WINDOW_HEIGHT),
+        min_size=(1200, 760),
         resizable=True,
         frameless=True,
         easy_drag=False,

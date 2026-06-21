@@ -68,7 +68,9 @@
                   <div class="detection-thumb">
                     <img v-if="item.thumb_url" class="file-thumb" :src="sourceThumbUrl(item)" alt="" loading="lazy" decoding="async" />
                     <div v-else class="file-icon">IMG</div>
-                    <i v-for="(box, boxIndex) in item.boxes || []" :key="boxIndex" class="mini-box" :style="miniBoxStyle(item, box)"></i>
+                    <span v-for="(box, boxIndex) in item.boxes || []" :key="boxIndex" class="mini-box" :style="miniBoxStyle(item, box)">
+                      <i v-if="boxRotationMarker(box) !== null" class="mini-rotation-arrow" :style="rotationArrowStyle(boxRotationMarker(box))">↑</i>
+                    </span>
                   </div>
                   <strong>{{ item.name }}</strong>
                   <span>{{ item.relative || item.path }}</span>
@@ -154,6 +156,7 @@
                 :style="box.style"
                 @pointerdown.stop="startDrag(index, 'move', $event)"
               >
+                <i v-if="box.marker !== null" class="rotation-arrow" :style="box.arrowStyle">↑</i>
                 <span>{{ String(index + 1).padStart(3, '0') }}</span>
                 <i v-for="handle in handles" :key="handle" :class="['handle', handle]" @pointerdown.stop="startDrag(index, handle, $event)" />
               </div>
@@ -172,16 +175,17 @@
         <div class="queue-card box-list-card">
           <div v-for="(box, index) in single.boxes" :key="index" class="queue-row done" :class="{ active: selectedBox === index }" @click="selectedBox = index">
             <span>{{ String(index + 1).padStart(3, '0') }}</span>
-            <b>{{ Math.round(box[2] - box[0]) }} x {{ Math.round(box[3] - box[1]) }}</b>
+            <b>{{ Math.round(box[2] - box[0]) }} x {{ Math.round(box[3] - box[1]) }} · {{ rotationLabel(boxRotationMarker(box)) }}</b>
           </div>
           <p v-if="!single.boxes.length" class="muted">暂无检测框</p>
         </div>
         <PanelTitle title="检测框操作" />
         <div class="box-action-card">
           <button :disabled="single.processing" @click="addBox">新增检测框</button>
-          <button :disabled="single.processing" @click="deleteBox">删除选中</button>
-          <button :disabled="single.processing" @click="splitBox('vertical')">纵向二等分</button>
-          <button :disabled="single.processing" @click="splitBox('horizontal')">横向二等分</button>
+          <button :disabled="single.processing" @click="deleteBox">删除检测框</button>
+          <button :disabled="single.processing" @click="splitBox('vertical')">左右分割</button>
+          <button :disabled="single.processing" @click="splitBox('horizontal')">上下分割</button>
+          <button class="rotation-action" :disabled="single.processing || selectedBox === null" @click="cycleRotationMarker">旋转</button>
           <button :disabled="single.processing" @click="undoBox">撤销</button>
         </div>
         <PanelTitle title="单图日志" />
@@ -262,7 +266,7 @@ const defaultOptions = () => ({
   skew_gain_percent: 4,
   detection_strategy: "balanced",
   split_strategy: "balanced",
-  auto_face_rotate: false,
+  auto_face_rotate: true,
   save_split_preview: false,
 });
 
@@ -379,6 +383,8 @@ const imageLayerStyle = computed(() => ({
 
 const displayBoxes = computed(() =>
   single.boxes.map((box) => ({
+    marker: boxRotationMarker(box),
+    arrowStyle: rotationArrowStyle(boxRotationMarker(box)),
     style: {
       left: `${box[0] * previewScale.value}px`,
       top: `${box[1] * previewScale.value}px`,
@@ -387,6 +393,44 @@ const displayBoxes = computed(() =>
     },
   })),
 );
+
+function normalizeRotationMarker(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const marker = Number(value);
+  return [0, 90, 180, 270].includes(marker) ? marker : null;
+}
+
+function boxRotationMarker(box) {
+  return normalizeRotationMarker(box?.[4]);
+}
+
+function rotationArrowStyle(marker) {
+  const value = normalizeRotationMarker(marker);
+  return value === null ? {} : { transform: `rotate(${value}deg)` };
+}
+
+function rotationLabel(marker) {
+  const value = normalizeRotationMarker(marker);
+  if (value === 0) return "方向：↑";
+  if (value === 90) return "方向：→";
+  if (value === 180) return "方向：↓";
+  if (value === 270) return "方向：←";
+  return "方向：未标记";
+}
+
+function normalizeBox(box, marker = boxRotationMarker(box), manualChanged = box?.[8] || false) {
+  return [
+    Math.round(Number(box?.[0] || 0)),
+    Math.round(Number(box?.[1] || 0)),
+    Math.round(Number(box?.[2] || 0)),
+    Math.round(Number(box?.[3] || 0)),
+    normalizeRotationMarker(marker),
+    box?.[5] ?? null,
+    box?.[6] ?? null,
+    Boolean(box?.[7]),
+    Boolean(manualChanged),
+  ];
+}
 
 function cloneOptions(options) {
   return JSON.parse(JSON.stringify(options || defaultOptions()));
@@ -689,10 +733,10 @@ async function loadRuntimeInfo() {
 }
 
 function queueTone(status) {
-  if (status === "已检测") return "detected";
+  if (status === "已检测" || status === "已重新检测") return "detected";
   if (status === "已修改") return "edited";
   if (status === "已完成") return "done";
-  if (status === "处理中") return "running";
+  if (status === "处理中" || status === "重新检测中") return "running";
   if (status === "失败") return "failed";
   return "pending";
 }
@@ -807,6 +851,9 @@ async function detectBatch() {
     batch.redetectTargetKeys = Array.from(targetKeys);
     batch.progressTotal = targetPaths.length;
     if (!isRedetect) batch.detected = false;
+    if (isRedetect) {
+      batch.items = batch.items.map((item) => (targetKeys.has(batchStableKey(item)) ? { ...item, status: "等待重新检测" } : item));
+    }
     batch.processing = true;
     batch.done = 0;
     batch.pending = targetPaths.length;
@@ -855,6 +902,14 @@ async function pollJob() {
     job.logs.slice(batch.serverLogCount).forEach((line) => pushLog(batch.logs, line));
     batch.serverLogCount = job.logs.length;
     if (isRedetect) {
+      const targetKeys = new Set(batch.redetectTargetKeys);
+      const liveStatusByPath = new Map(job.items.map((item) => [item.path, item.status]));
+      if (job.status !== "done") {
+        batch.items = batch.items.map((item) => {
+          if (!targetKeys.has(batchStableKey(item))) return item;
+          return { ...item, status: liveStatusByPath.get(item.path) || "等待重新检测" };
+        });
+      }
       batch.done = job.status === "done" ? job.total : job.index;
       batch.pending = Math.max(0, job.total - batch.done);
       batch.saved = totalBatchBoxes();
@@ -863,7 +918,6 @@ async function pollJob() {
         window.setTimeout(pollJob, 700);
         return;
       }
-      const targetKeys = new Set(batch.redetectTargetKeys);
       const replacements = new Map();
       job.items.forEach((item) => {
         const key = batchStableKey(item);
@@ -874,7 +928,7 @@ async function pollJob() {
         const replacement = replacements.get(batchStableKey(item));
         if (!replacement || item.edited) return item;
         updatedCount += 1;
-        return { ...replacement, options: cloneOptions(batch.options), updated_at: Date.now() };
+        return { ...replacement, status: "已重新检测", options: cloneOptions(batch.options), updated_at: Date.now() };
       });
       batch.processing = false;
       batch.detected = true;
@@ -973,7 +1027,7 @@ function openBatchItem(item, event) {
   single.imageUrl = cacheBustUrl(item.image_url, item.updated_at || Date.now());
   single.imageWidth = item.width || 1;
   single.imageHeight = item.height || 1;
-  single.boxes = (item.boxes || []).map((box) => [...box]);
+  single.boxes = (item.boxes || []).map((box) => normalizeBox(box));
   single.undo = [];
   single.options = cloneOptions(item.options || batch.options);
   single.detected = true;
@@ -1051,7 +1105,7 @@ async function detectSingle() {
     single.imageUrl = cacheBustUrl(data.image_url);
     single.imageWidth = data.width;
     single.imageHeight = data.height;
-    single.boxes = data.boxes;
+    single.boxes = (data.boxes || []).map((box) => normalizeBox(box));
     single.undo = [];
     single.detected = true;
     selectedBox.value = single.boxes.length ? 0 : null;
@@ -1143,7 +1197,7 @@ function addBox() {
   pushUndo();
   const w = single.imageWidth;
   const h = single.imageHeight;
-  single.boxes.push([Math.round(w * 0.25), Math.round(h * 0.25), Math.round(w * 0.75), Math.round(h * 0.75)]);
+  single.boxes.push(normalizeBox([Math.round(w * 0.25), Math.round(h * 0.25), Math.round(w * 0.75), Math.round(h * 0.75), null, null, null, false, false]));
   selectedBox.value = single.boxes.length - 1;
   pushLog(single.logs, "手动新增检测框。");
 }
@@ -1153,7 +1207,7 @@ function deleteBox() {
   pushUndo();
   single.boxes.splice(selectedBox.value, 1);
   selectedBox.value = single.boxes.length ? Math.min(selectedBox.value, single.boxes.length - 1) : null;
-  pushLog(single.logs, "删除选中检测框。");
+  pushLog(single.logs, "删除检测框。");
 }
 
 function undoBox() {
@@ -1169,13 +1223,23 @@ function splitBox(direction) {
   pushUndo();
   if (direction === "vertical") {
     const mid = Math.round((box[0] + box[2]) / 2);
-    single.boxes.splice(selectedBox.value, 1, [box[0], box[1], mid, box[3]], [mid, box[1], box[2], box[3]]);
-    pushLog(single.logs, "选中检测框已纵向二等分。");
+    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], mid, box[3], null]), normalizeBox([mid, box[1], box[2], box[3], null]));
+    pushLog(single.logs, "选中检测框已左右分割。");
   } else {
     const mid = Math.round((box[1] + box[3]) / 2);
-    single.boxes.splice(selectedBox.value, 1, [box[0], box[1], box[2], mid], [box[0], mid, box[2], box[3]]);
-    pushLog(single.logs, "选中检测框已横向二等分。");
+    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], box[2], mid, null]), normalizeBox([box[0], mid, box[2], box[3], null]));
+    pushLog(single.logs, "选中检测框已上下分割。");
   }
+}
+
+function cycleRotationMarker() {
+  if (selectedBox.value == null || !single.boxes[selectedBox.value]) return;
+  pushUndo();
+  const box = single.boxes[selectedBox.value];
+  const current = boxRotationMarker(box);
+  const next = current === null ? 0 : current === 0 ? 90 : current === 90 ? 180 : current === 180 ? 270 : null;
+  single.boxes[selectedBox.value] = normalizeBox(box, next, true);
+  pushLog(single.logs, `旋转：${rotationLabel(next)}`);
 }
 
 function startDrag(index, mode, event) {
@@ -1207,7 +1271,7 @@ function onDrag(event) {
   y1 = Math.max(0, Math.min(single.imageHeight - 10, y1));
   x2 = Math.max(x1 + 10, Math.min(single.imageWidth, x2));
   y2 = Math.max(y1 + 10, Math.min(single.imageHeight, y2));
-  single.boxes[index] = [Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)];
+  single.boxes[index] = normalizeBox([Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2), boxRotationMarker(startBox), startBox[5] ?? null, startBox[6] ?? null, startBox[7] ?? false, startBox[8] ?? false]);
 }
 
 function stopDrag() {

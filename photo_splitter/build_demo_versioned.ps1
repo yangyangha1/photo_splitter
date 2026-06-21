@@ -97,7 +97,9 @@ function Get-PyInstallerArgs {
         "--name", $AppName,
         "--icon", "photo_splitter\assets\photo_splitter_icon.ico",
         "--add-data", "photo_splitter\assets\photo_splitter_icon.ico;photo_splitter\assets",
+        "--add-data", "photo_splitter\assets\photo_splitter_icon.svg;photo_splitter\assets",
         "--add-data", "photo_splitter\assets\photo_splitter_icon_preview.png;photo_splitter\assets",
+        "--add-data", "photo_splitter\models;photo_splitter\models",
         "--add-data", "photo_splitter\web_ui\dist;photo_splitter\web_ui\dist"
     ) + $opencvArgs + @(
         "--hidden-import", "flask",

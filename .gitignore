@@ -19,6 +19,7 @@ gui_startup.log
 *.wps
 *.log
 *.txt
+build_web_ui.bat
 
 .DS_Store
 Thumbs.db

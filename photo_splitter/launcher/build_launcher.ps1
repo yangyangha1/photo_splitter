@@ -11,6 +11,7 @@ $packageDir = Split-Path -Parent $launcherDir
 $projectRoot = Split-Path -Parent $packageDir
 $sourcePath = Join-Path $launcherDir "PhotoSplitterLauncher.cs"
 $iconPath = Join-Path $packageDir "assets\photo_splitter_icon.ico"
+$iconPreviewPath = Join-Path $packageDir "assets\photo_splitter_icon_preview.png"
 
 if (-not (Test-Path -LiteralPath $sourcePath)) {
     throw "Launcher source was not found: $sourcePath"
@@ -26,6 +27,9 @@ $compilerOptions.Add("/optimize+")
 $compilerOptions.Add("/platform:anycpu")
 if (Test-Path -LiteralPath $iconPath) {
     $compilerOptions.Add("/win32icon:`"$iconPath`"")
+}
+if (Test-Path -LiteralPath $iconPreviewPath) {
+    $compilerOptions.Add("/resource:`"$iconPreviewPath`",PhotoSplitterIconPreview")
 }
 if ($PayloadPath.Trim()) {
     $payloadFullPath = [System.IO.Path]::GetFullPath($PayloadPath)

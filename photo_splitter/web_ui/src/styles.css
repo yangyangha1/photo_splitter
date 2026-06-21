@@ -899,10 +899,27 @@ input[type="range"] {
 
 .mini-box {
   position: absolute;
+  display: grid;
+  place-items: center;
   border: 2px solid #ff4848;
   border-radius: 3px;
   box-shadow: 0 0 0 1px rgb(10 13 18 / 0.42);
   pointer-events: none;
+}
+
+.mini-rotation-arrow {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: #35e6d0;
+  font-size: 20px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+  opacity: 0.6;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 0.72);
+  transform-origin: center;
 }
 
 .batch-export-footer {
@@ -1040,10 +1057,6 @@ input[type="range"] {
   padding: 0 8px;
 }
 
-.box-action-card button:last-child {
-  grid-column: 1 / -1;
-}
-
 .single-preview-content {
   min-height: 0;
   height: 100%;
@@ -1125,6 +1138,26 @@ input[type="range"] {
   position: absolute;
   border: 2px solid #ff4848;
   cursor: move;
+}
+
+.rotation-arrow {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #35e6d0;
+  font-size: clamp(28px, 7vw, 120px);
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1;
+  opacity: 0.6;
+  pointer-events: none;
+  text-shadow: 0 3px 10px rgb(0 0 0 / 0.72), 0 0 18px rgb(53 230 208 / 0.28);
+  transform-origin: center;
+}
+
+.box.selected .rotation-arrow {
+  opacity: 0.76;
 }
 
 .box.selected {

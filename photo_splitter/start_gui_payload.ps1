@@ -12,6 +12,8 @@ if (Test-Path -LiteralPath $localPython) {
 
 $logFile = Join-Path $projectRoot "gui_startup.log"
 $webUiDir = Join-Path $packageDir "web_ui"
+$distIndex = Join-Path $webUiDir "dist\index.html"
+$distAssetsDir = Join-Path $webUiDir "dist\assets"
 $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if (-not $npmCommand) {
     $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
@@ -61,27 +63,35 @@ function Invoke-LoggedNative {
 }
 
 try {
-    if (-not $npmCommand) {
-        throw "npm was not found. Please install Node.js first."
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $webUiDir "package.json"))) {
-        throw "Vue UI package.json was not found: $webUiDir"
-    }
+    $distReady = (Test-Path -LiteralPath $distIndex) -and
+        (Test-Path -LiteralPath $distAssetsDir) -and
+        ((Get-ChildItem -LiteralPath $distAssetsDir -Filter "*.js" -File -ErrorAction SilentlyContinue | Select-Object -First 1) -ne $null)
 
-    Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Building Vue UI before startup..."
-    Push-Location $webUiDir
-    try {
-        if (-not (Test-Path -LiteralPath "node_modules")) {
-            Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Installing Vue UI dependencies..."
-            Invoke-LoggedNative -FilePath $npmCommand.Source -Arguments @("install") -WorkingDirectory $webUiDir -Description "Vue UI dependency install"
+    if ($distReady) {
+        Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Using existing Vue UI build."
+    } else {
+        if (-not $npmCommand) {
+            throw "npm was not found and Vue UI build output is missing. Please install Node.js first."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $webUiDir "package.json"))) {
+            throw "Vue UI package.json was not found: $webUiDir"
         }
 
-        Invoke-LoggedNative -FilePath $npmCommand.Source -Arguments @("run", "build") -WorkingDirectory $webUiDir -Description "Vue UI build"
-    } finally {
-        Pop-Location
-    }
+        Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Vue UI build output is missing; building before startup..."
+        Push-Location $webUiDir
+        try {
+            if (-not (Test-Path -LiteralPath "node_modules")) {
+                Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Installing Vue UI dependencies..."
+                Invoke-LoggedNative -FilePath $npmCommand.Source -Arguments @("install") -WorkingDirectory $webUiDir -Description "Vue UI dependency install"
+            }
 
-    Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Vue UI build completed."
+            Invoke-LoggedNative -FilePath $npmCommand.Source -Arguments @("run", "build") -WorkingDirectory $webUiDir -Description "Vue UI build"
+        } finally {
+            Pop-Location
+        }
+
+        Add-Content -LiteralPath $logFile -Encoding UTF8 -Value "Vue UI build completed."
+    }
     Invoke-LoggedNative -FilePath $pythonExe -Arguments @("-m", "photo_splitter.web_app") -WorkingDirectory $projectRoot -Description "Vue GUI"
     exit 0
 } catch {

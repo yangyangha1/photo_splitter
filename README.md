@@ -10,9 +10,9 @@
 
 ## 发布版本
 
-- `photo_splitter_v3.exe`：标准版，包含 OpenCV，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
-- `photo_splitter_v3_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
-- `photo_splitter_v3_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
+- `photo_splitter_v4.exe`：标准版，包含 OpenCV 和 YuNet 人脸检测模型，适合大多数电脑。可使用 OpenCV OpenCL/T-API 或 OpenCV CPU 路径，检测精度和兼容性最均衡。
+- `photo_splitter_v4_cpu.exe`：CPU 轻量版，不包含 OpenCV 和 CuPy，体积最小。可打开界面、读取图片并执行基础分割，但边缘检测、轮廓分析和人脸方向判断弱于标准版。
+- `photo_splitter_v4_cupy_cuda.exe`：CuPy CUDA 版，面向本机或已安装 CUDA 12 runtime 的 NVIDIA 显卡电脑。程序不内置完整 CUDA 运行库；当系统 `CUDA_PATH` 或 PATH 中可找到 CUDA 12 DLL，例如 `cudart64_12.dll`、`cublas64_12.dll`，且 NVIDIA 驱动正常时，系统检测日志会显示 `CuPy CUDA GPU`。如果目标电脑缺少匹配 CUDA runtime，会自动降级到 OpenCV 或 CPU 后端。
 
 ## 功能
 
