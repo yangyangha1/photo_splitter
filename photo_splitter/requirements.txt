@@ -3,3 +3,4 @@ numpy>=1.24
 opencv-python-headless>=4.8; platform_system != "Darwin" or platform_machine != "arm64"
 flask>=3.0
 pywebview>=5.0; platform_system == "Windows"
+# CUDA/CuPy dependencies are intentionally not included; the supported build uses OpenCV CPU by default.

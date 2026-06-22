@@ -30,6 +30,8 @@ from photo_splitter.config import (
     JPEG_QUALITY,
     PROCESSING_PRESETS,
 )
+from photo_splitter.performance import jpeg_save_kwargs, plan_workers
+from photo_splitter.runtime_backend import configure_opencv_threads, get_compute_backend
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -39,6 +41,7 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 JOBS: dict[str, dict[str, Any]] = {}
 SINGLE_CACHE: dict[str, dict[str, Any]] = {}
 PREVIEW_CACHE: dict[str, dict[str, Any]] = {}
+ALLOWED_SOURCE_PATHS: set[str] = set()
 WEBVIEW_WINDOW: Any | None = None
 WEBVIEW_WINDOW_MAXIMIZED = False
 HTTP_SERVER: Any | None = None
@@ -48,6 +51,8 @@ MAIN_WINDOW_HEIGHT = 1020
 SPLASH_WINDOW_WIDTH = 560
 SPLASH_WINDOW_HEIGHT = 320
 ORIENTATION_DETECTOR_LOCK = threading.Lock()
+STATE_LOCK = threading.RLock()
+OUTPUT_PATH_LOCK = threading.Lock()
 
 
 def resource_path(relative_path: str) -> Path:
@@ -217,6 +222,22 @@ def preset_payload() -> list[dict[str, Any]]:
     ]
 
 
+def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
 def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """把前端参数转换成算法需要的强类型配置，并兜底到当前预设。"""
     preset_key = str(payload.get("preset") or DEFAULT_PRESET_KEY)
@@ -232,17 +253,21 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if detection_strategy not in DETECTION_STRATEGIES:
         detection_strategy = DEFAULT_DETECTION_STRATEGY
+    dark_threshold = clamp_int(payload.get("dark_threshold", preset.dark_threshold), preset.dark_threshold, 0, 255)
+    min_area_ratio = clamp_float(payload.get("min_area_ratio", preset.min_area_ratio), preset.min_area_ratio, 0.0001, 0.20)
+    white_threshold = clamp_int(payload.get("white_threshold", preset.white_threshold), preset.white_threshold, 0, 255)
+    skew_gain_percent = clamp_int(payload.get("skew_gain_percent", preset.skew_gain_percent), preset.skew_gain_percent, 0, 100)
     return {
         "preset": preset.key,
         "preset_name": preset.name,
-        "dark_threshold": int(payload.get("dark_threshold", preset.dark_threshold)),
-        "min_area_ratio": float(payload.get("min_area_ratio", preset.min_area_ratio)),
-        "white_threshold": int(payload.get("white_threshold", preset.white_threshold)),
+        "dark_threshold": dark_threshold,
+        "min_area_ratio": min_area_ratio,
+        "white_threshold": white_threshold,
         "background_mode": background_mode,
         "detection_strategy": detection_strategy,
         "split_strategy": detection_strategy,
-        "skew_min_score_gain": 1.0 + int(payload.get("skew_gain_percent", preset.skew_gain_percent)) / 100,
-        "skew_gain_percent": int(payload.get("skew_gain_percent", preset.skew_gain_percent)),
+        "skew_min_score_gain": 1.0 + skew_gain_percent / 100,
+        "skew_gain_percent": skew_gain_percent,
         "auto_face_rotate": bool(payload.get("auto_face_rotate", True)),
         "save_split_preview": bool(payload.get("save_split_preview", False)),
     }
@@ -250,6 +275,24 @@ def options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def json_error(message: str, status: int = 400):
     return jsonify({"ok": False, "error": message}), status
+
+
+def remember_source_path(path: Path) -> None:
+    try:
+        resolved = str(path.expanduser().resolve())
+    except OSError:
+        return
+    with STATE_LOCK:
+        ALLOWED_SOURCE_PATHS.add(resolved)
+
+
+def is_known_source_path(path: Path) -> bool:
+    try:
+        resolved = str(path.expanduser().resolve())
+    except OSError:
+        return False
+    with STATE_LOCK:
+        return resolved in ALLOWED_SOURCE_PATHS
 
 
 ROTATION_MARKERS = {0, 90, 180, 270}
@@ -353,6 +396,7 @@ def apply_orientation_detection_after_boxes(
 
 def thumb_url_for(path: Path, page_stem: str | None = None, max_side: int = 360) -> str:
     """生成本地缩略图接口地址，路径只在本机后端解析，不暴露给外部服务。"""
+    remember_source_path(path)
     try:
         stat = path.stat()
         version = f"{stat.st_mtime_ns}-{stat.st_size}"
@@ -384,32 +428,48 @@ def load_source_page_image(source: Path, page_stem: str | None = None) -> Any:
     """按需读取源图页。批量结果不常驻图片，进入单图编辑或导出时再临时加载。"""
     from photo_splitter.io_utils import iter_source_images
 
-    pages = iter_source_images(source)
-    if not pages:
-        raise ValueError("源图没有可读取的页面。")
-    selected_index = 0
-    if page_stem:
-        for index, (stem, _image) in enumerate(pages):
-            if stem == page_stem:
-                selected_index = index
-                break
-    for index, (_stem, image) in enumerate(pages):
-        if index != selected_index:
+    first_image = None
+    for stem, image in iter_source_images(source):
+        if first_image is None:
+            first_image = image
+        elif stem != page_stem:
             image.close()
-    return pages[selected_index][1]
+        if not page_stem or stem == page_stem:
+            if first_image is not image:
+                first_image.close()
+            return image
+    if first_image is not None:
+        return first_image
+    raise ValueError("源图没有可读取的页面。")
+
+
+def load_first_source_page(source: Path) -> tuple[str, Any]:
+    from photo_splitter.io_utils import iter_source_images
+
+    pages = iter_source_images(source)
+    try:
+        return next(pages)
+    except StopIteration as exc:
+        raise ValueError("source image has no readable pages") from exc
+    finally:
+        close = getattr(pages, "close", None)
+        if close:
+            close()
 
 
 def cache_processed_image(source: Path, page_stem: str, image: Any, boxes: list[Any], options: dict[str, Any]) -> str:
     """只缓存检测结果元数据，不缓存大图；图片在点击预览或导出时按需重读。"""
     image_id = uuid.uuid4().hex
-    SINGLE_CACHE[image_id] = {
-        "source": str(source),
-        "page_stem": page_stem,
-        "width": image.width,
-        "height": image.height,
-        "boxes": [box_payload(box) for box in boxes],
-        "options": options,
-    }
+    remember_source_path(source)
+    with STATE_LOCK:
+        SINGLE_CACHE[image_id] = {
+            "source": str(source),
+            "page_stem": page_stem,
+            "width": image.width,
+            "height": image.height,
+            "boxes": [box_payload(box) for box in boxes],
+            "options": options,
+        }
     return image_id
 
 
@@ -456,74 +516,34 @@ def detected_item_payload(
 
 def trim_preview_cache(limit: int = 60) -> None:
     """限制单图预览缓存数量，避免长时间使用后把大图一直留在内存里。"""
-    overflow = len(PREVIEW_CACHE) - limit
-    if overflow <= 0:
-        return
-    for key in list(PREVIEW_CACHE.keys())[:overflow]:
-        PREVIEW_CACHE.pop(key, None)
+    with STATE_LOCK:
+        overflow = len(PREVIEW_CACHE) - limit
+        if overflow <= 0:
+            return
+        for key in list(PREVIEW_CACHE.keys())[:overflow]:
+            PREVIEW_CACHE.pop(key, None)
 
 
 def release_accelerator_memory() -> None:
     """任务结束后释放可回收的 GPU 缓存；界面缩略图和检测框数据不依赖这部分显存。"""
-    try:
-        from photo_splitter.runtime_backend import release_cupy_memory
-
-        release_cupy_memory()
-    except Exception:
-        pass
-
-
-def worker_override_from_env(name: str) -> int | None:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
+    gc.collect()
 
 
 def batch_worker_count(kind: str, total: int) -> tuple[int, str]:
     """按当前计算后端选择批处理并发度，避免 GPU 后端被过度并发拖慢。"""
-    if total <= 1:
-        return 1, "single-item"
-    env_name = "PHOTO_SPLITTER_DETECT_WORKERS" if kind == "detect" else "PHOTO_SPLITTER_EXPORT_WORKERS"
-    override = worker_override_from_env(env_name)
-    if override is not None:
-        return max(1, min(total, override)), f"{env_name}={override}"
-
-    cpu_count = max(1, os.cpu_count() or 1)
-    try:
-        from photo_splitter.runtime_backend import get_compute_backend
-
-        backend = get_compute_backend()
-    except Exception:
-        backend = "unknown"
-
-    if kind == "detect":
-        if backend in {"cupy-cuda", "opencv-cuda"}:
-            return 1, backend
-        if backend == "opencv-opencl":
-            return min(total, 2), backend
-        if backend == "opencv-cpu":
-            return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
-        return min(total, max(2, min(3, cpu_count // 2 or 1))), backend
-
-    if backend in {"cupy-cuda", "opencv-cuda"}:
-        return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
-    if backend == "opencv-opencl":
-        return min(total, max(2, min(4, cpu_count // 2 or 1))), backend
-    return min(total, max(2, min(6, cpu_count // 2 or 1))), backend
+    plan = plan_workers(kind, total, backend=get_compute_backend())
+    opencv_threads = configure_opencv_threads(worker_count=plan.count)
+    return plan.count, f"{plan.reason}, opencv_threads={opencv_threads}"
 
 
 def clear_detection_state(keep_recent_jobs: int = 3) -> None:
     """开始新一轮检测前清理旧检测结果，避免确认页和历史任务越积越多。"""
-    SINGLE_CACHE.clear()
-    PREVIEW_CACHE.clear()
-    if len(JOBS) > keep_recent_jobs:
-        for key in list(JOBS.keys())[:-keep_recent_jobs]:
-            JOBS.pop(key, None)
+    with STATE_LOCK:
+        SINGLE_CACHE.clear()
+        PREVIEW_CACHE.clear()
+        if len(JOBS) > keep_recent_jobs:
+            for key in list(JOBS.keys())[:-keep_recent_jobs]:
+                JOBS.pop(key, None)
     gc.collect()
     release_accelerator_memory()
 
@@ -568,8 +588,15 @@ def api_config():
 def api_runtime():
     from photo_splitter.runtime_backend import detect_runtime_environment
 
-    probe = str(request.args.get("probe") or "1").strip().lower() not in {"0", "false", "no"}
-    return jsonify({"ok": True, "runtime": detect_runtime_environment(probe_accelerators=probe)})
+    runtime = detect_runtime_environment(probe_accelerators=True)
+    backend = str(runtime.get("compute_backend") or "opencv-cpu")
+    detect_plan = plan_workers("detect", max(2, int(runtime.get("cpu_count") or 1)), backend=backend)
+    export_plan = plan_workers("export", max(2, int(runtime.get("cpu_count") or 1)), backend=backend)
+    runtime["worker_plans"] = {
+        "detect": {"count": detect_plan.count, "reason": detect_plan.reason},
+        "export": {"count": export_plan.count, "reason": export_plan.reason},
+    }
+    return jsonify({"ok": True, "runtime": runtime})
 
 
 @app.post("/api/open-path")
@@ -589,6 +616,8 @@ def api_source_thumb():
     path = Path(str(request.args.get("path") or "")).expanduser()
     if not path.exists():
         return "not found", 404
+    if not is_known_source_path(path):
+        return "forbidden", 403
     page_stem = str(request.args.get("page_stem") or "")
     try:
         max_side = max(80, min(720, int(request.args.get("size") or 360)))
@@ -646,7 +675,8 @@ def api_batch_detect():
     done_status = "已重新检测" if preserve_detection_state else "已检测"
     action_label = "重新检测" if preserve_detection_state else "检测"
     if preserve_detection_state:
-        PREVIEW_CACHE.clear()
+        with STATE_LOCK:
+            PREVIEW_CACHE.clear()
         gc.collect()
         release_accelerator_memory()
     else:
@@ -669,17 +699,18 @@ def api_batch_detect():
 
     def worker() -> None:
         from photo_splitter.detection import split_image
-        from photo_splitter.io_utils import iter_source_images
+        from photo_splitter.io_utils import count_source_pages, iter_source_images
 
         def detect_source(index: int, source: Path) -> dict[str, Any]:
-            job = JOBS.get(job_id)
-            if job:
-                job["items"][index - 1]["status"] = running_status
+            with STATE_LOCK:
+                job = JOBS.get(job_id)
+                if job:
+                    job["items"][index - 1]["status"] = running_status
             try:
-                pages = iter_source_images(source)
+                page_count = count_source_pages(source)
                 file_box_count = 0
                 item_results: list[dict[str, Any]] = []
-                for page_stem, image in pages:
+                for page_stem, image in iter_source_images(source):
                     processed, boxes, _angle = split_image(
                         image,
                         int(options["dark_threshold"]),
@@ -689,13 +720,11 @@ def api_batch_detect():
                     )
                     marked_boxes = apply_orientation_detection_after_boxes(processed, boxes, bool(options["auto_face_rotate"]))
                     image_id = cache_processed_image(source, page_stem, processed, marked_boxes, options)
-                    item_results.append(detected_item_payload(source, input_root, page_stem, len(pages), image_id, processed, marked_boxes, status=done_status))
+                    item_results.append(detected_item_payload(source, input_root, page_stem, page_count, image_id, processed, marked_boxes, status=done_status))
                     file_box_count += len(marked_boxes)
                     if processed is not image:
                         processed.close()
                     image.close()
-                pages.clear()
-                gc.collect()
                 return {"ok": True, "index": index, "source": source, "items": item_results, "box_count": file_box_count}
             except Exception as exc:
                 return {"ok": False, "index": index, "source": source, "error": str(exc)}
@@ -703,7 +732,6 @@ def api_batch_detect():
         detected_by_index: dict[int, list[dict[str, Any]]] = {}
         workers, backend_note = batch_worker_count("detect", len(images))
         job = JOBS[job_id]
-        job["logs"].append(f"{action_label}并发：{workers} 个 worker（后端：{backend_note}）。")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = []
             for index, source in enumerate(images, start=1):
@@ -718,6 +746,8 @@ def api_batch_detect():
                 source = Path(result["source"])
                 job = JOBS[job_id]
                 job["index"] = completed
+                if completed % 8 == 0:
+                    gc.collect()
                 if result["ok"]:
                     box_count = int(result["box_count"])
                     detected_by_index[result_index] = list(result["items"])
@@ -732,11 +762,16 @@ def api_batch_detect():
                     job["logs"].append(f"失败：{source.name}，{error}")
 
         detected_items: list[dict[str, Any]] = []
-        for index in range(1, len(images) + 1):
-            detected_items.extend(detected_by_index.get(index, []))
         job = JOBS[job_id]
+        original_items = list(job["items"])
+        for index in range(1, len(images) + 1):
+            items_for_source = detected_by_index.get(index)
+            if items_for_source:
+                detected_items.extend(items_for_source)
+            else:
+                detected_items.append(original_items[index - 1])
         job["status"] = "done"
-        job["items"] = detected_items or job["items"]
+        job["items"] = detected_items
         job["logs"].append(f"批量检测完成，检测框 {job['saved']} 个。")
         release_accelerator_memory()
 
@@ -826,18 +861,24 @@ def api_batch_export():
                         oriented_crop.close()
                     if oriented_crop is not raw_crop:
                         raw_crop.close()
-                    target = unique_output_path(target_dir / f"{image_name}_{box_index:03d}.jpg", overwrite=False)
-                    crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
-                    crop.close()
+                    with OUTPUT_PATH_LOCK:
+                        target = unique_output_path(target_dir / f"{image_name}_{box_index:03d}.jpg", overwrite=False)
+                    try:
+                        crop.save(target, **jpeg_save_kwargs(fast=True, quality=JPEG_QUALITY))
+                    finally:
+                        crop.close()
                     saved.append(target)
                 if save_split_preview:
                     preview = image.copy()
                     draw = ImageDraw.Draw(preview)
                     for box_index, box in enumerate(boxes, start=1):
                         draw_preview_box(draw, tuple(box[:4]), f"{box_index:03d}", image.width)
-                    preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
-                    preview.save(preview_path, "JPEG", quality=92)
-                    preview.close()
+                    with OUTPUT_PATH_LOCK:
+                        preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite=False)
+                    try:
+                        preview.save(preview_path, **jpeg_save_kwargs(fast=True, quality=92))
+                    finally:
+                        preview.close()
                 return {
                     "ok": True,
                     "index": index,
@@ -856,11 +897,9 @@ def api_batch_export():
             finally:
                 if should_close_image and image is not None:
                     image.close()
-                gc.collect()
 
         workers, backend_note = batch_worker_count("export", len(items))
         job = JOBS[job_id]
-        job["logs"].append(f"导出并发：{workers} 个 worker（后端：{backend_note}）。")
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = []
             for index, item_payload in enumerate(items, start=1):
@@ -873,6 +912,8 @@ def api_batch_export():
                 result_index = int(result["index"])
                 job = JOBS[job_id]
                 job["index"] = completed
+                if completed % 8 == 0:
+                    gc.collect()
                 if result["ok"]:
                     saved_count = int(result["saved"])
                     job["saved"] += saved_count
@@ -947,14 +988,14 @@ def api_single_preview():
     source = Path(str(payload.get("source") or "")).expanduser()
     if not source.exists():
         return json_error("单张照片不存在。")
-    pages = iter_source_images(source)
-    if not pages:
+    try:
+        page_stem, image = load_first_source_page(source)
+    except ValueError:
         return json_error("单张照片没有可读取的页面。")
-    page_stem, image = pages[0]
-    for _unused_stem, unused_image in pages[1:]:
-        unused_image.close()
     preview_id = uuid.uuid4().hex
-    PREVIEW_CACHE[preview_id] = {"source": str(source), "page_stem": page_stem, "width": image.width, "height": image.height}
+    remember_source_path(source)
+    with STATE_LOCK:
+        PREVIEW_CACHE[preview_id] = {"source": str(source), "page_stem": page_stem, "width": image.width, "height": image.height}
     width, height = image.width, image.height
     image.close()
     gc.collect()
@@ -1010,17 +1051,16 @@ def api_single_detect():
     # 否则其它批量项的 image_id 会失效，后续确认导出会提示缓存不存在。
     preserve_detection_state = bool(payload.get("preserve_detection_state")) or preserve_image_id in SINGLE_CACHE
     if preserve_detection_state:
-        PREVIEW_CACHE.clear()
+        with STATE_LOCK:
+            PREVIEW_CACHE.clear()
         gc.collect()
         release_accelerator_memory()
     else:
         clear_detection_state()
-    pages = iter_source_images(source)
-    if not pages:
+    try:
+        page_stem, image = load_first_source_page(source)
+    except ValueError:
         return json_error("单张照片没有可读取的页面。")
-    page_stem, image = pages[0]
-    for _unused_stem, unused_image in pages[1:]:
-        unused_image.close()
     # 单图检测使用与批量处理相同的检测入口，保证 UI 预览和最终批量算法一致。
     processed, boxes, _angle = split_image(
         image,
@@ -1118,9 +1158,12 @@ def api_single_export():
                 oriented_crop.close()
             if oriented_crop is not raw_crop:
                 raw_crop.close()
-            target = unique_output_path(output_dir / f"{source_name}_manual_{index:03d}.jpg", overwrite=False)
-            crop.save(target, "JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=True, progressive=True)
-            crop.close()
+            with OUTPUT_PATH_LOCK:
+                target = unique_output_path(output_dir / f"{source_name}_manual_{index:03d}.jpg", overwrite=False)
+            try:
+                crop.save(target, **jpeg_save_kwargs(fast=True, quality=JPEG_QUALITY))
+            finally:
+                crop.close()
             saved.append(target)
         preview_path: Path | None = None
         if bool(options.get("save_split_preview", False)):
@@ -1128,9 +1171,12 @@ def api_single_export():
             draw = ImageDraw.Draw(preview)
             for index, box in enumerate(boxes, start=1):
                 draw_preview_box(draw, tuple(box[:4]), f"{index:03d}", image.width)
-            preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
-            preview.save(preview_path, "JPEG", quality=92)
-            preview.close()
+            with OUTPUT_PATH_LOCK:
+                preview_path = unique_output_path(output_dir / f"分割预览_{source_name}_manual.jpg", overwrite=False)
+            try:
+                preview.save(preview_path, **jpeg_save_kwargs(fast=True, quality=92))
+            finally:
+                preview.close()
         return jsonify(
             {
                 "ok": True,
@@ -1167,9 +1213,9 @@ def set_windows_app_id() -> None:
 
 
 def configure_webview_runtime() -> None:
-    """限制 WebView2 自身占用 GPU，避免缩略图列表和玻璃效果被误认为 CUDA 计算负载。
+    """限制 WebView2 自身占用 GPU，避免缩略图列表和玻璃效果被误认为图像处理负载。
 
-    这里禁用的是 Edge WebView2 的界面合成 GPU 加速，不影响 CuPy/OpenCV 对 CUDA 的调用。
+    这里禁用的是 Edge WebView2 的界面合成 GPU 加速，不影响 OpenCV CPU 多线程处理。
     """
     if sys.platform != "win32":
         return

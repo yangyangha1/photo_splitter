@@ -15,7 +15,7 @@ from .config import (
 )
 from .io_utils import iter_images
 from .processing import process_source_for_cli
-from .runtime_backend import detect_runtime_environment
+from .runtime_backend import configure_opencv_threads, detect_runtime_environment
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,20 +76,22 @@ def main() -> int:
     input_root = input_path.resolve() if input_path.is_dir() else input_path.resolve().parent
     output_path.mkdir(parents=True, exist_ok=True)
 
+    worker_count = max(1, min(int(args.workers), len(images)))
+    opencv_threads = configure_opencv_threads(worker_count=worker_count)
+
     if args.runtime_info:
         runtime = detect_runtime_environment()
         print(
             "Runtime: "
             f"Python {runtime['python']}, CPU logical cores {runtime['cpu_count']}, "
             f"GPU {runtime['gpu_name'] or 'not detected'}, compute backend {runtime['compute_backend']}, "
-            f"CUDA {'available' if runtime.get('cuda_available') else 'not enabled'}, "
-            f"OpenCL {'available' if runtime.get('opencv_opencl_available') else 'not available'}"
+            f"OpenCV threads {opencv_threads}, "
+            f"OpenCL {'enabled' if runtime.get('opencv_opencl_available') else 'disabled'}"
         )
         if runtime.get("acceleration_note"):
             print(f"Runtime note: {runtime['acceleration_note']}")
 
     total_saved = 0
-    worker_count = max(1, min(int(args.workers), len(images)))
     jobs = [
         (
             source,

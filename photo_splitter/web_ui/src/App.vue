@@ -543,7 +543,10 @@ async function api(path, body) {
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await response.json();
+  const contentType = response.headers.get("content-type") || "";
+  const data = contentType.includes("application/json")
+    ? await response.json()
+    : { ok: false, error: await response.text() };
   if (!data.ok) throw new Error(data.error || "请求失败");
   return data;
 }
@@ -703,25 +706,24 @@ function applyPreset(options) {
 function runtimeSummary(info) {
   if (!info) return "系统检测：正在检测运行环境。";
   const backendNames = {
-    "cupy-cuda": "CuPy CUDA GPU",
-    "opencv-cuda": "OpenCV CUDA GPU",
     "opencv-opencl": "OpenCV OpenCL 加速",
-    "opencv-cpu": "OpenCV CPU",
+    "opencv-cpu": "OpenCV CPU 多线程",
     "numpy-cpu": "NumPy CPU",
-    "pending-cuda": "检测时优先确认 CuPy CUDA",
     "pending-cpu": "检测时确认可用后端",
   };
   const cpu = info.cpu_name || `${info.cpu_count || 0} 线程 CPU`;
   const gpu = info.gpu_name || "未检测到独立 GPU";
   const backend = backendNames[info.compute_backend] || info.compute_backend;
+  const detectWorkers = info.worker_plans?.detect?.count || 1;
+  const exportWorkers = info.worker_plans?.export?.count || 1;
   return {
-    html: `检测到CPU：${escapeLogHtml(cpu)}；GPU：${escapeLogHtml(gpu)}；<br>当前使用算力：<b>${escapeLogHtml(backend)}</b>。`,
+    html: `检测到CPU：${escapeLogHtml(cpu)}；GPU硬件信息：${escapeLogHtml(gpu)}；<br>当前优化路线：<b>${escapeLogHtml(backend)}</b>；检测并发 ${escapeLogHtml(detectWorkers)}，导出并发 ${escapeLogHtml(exportWorkers)}。`,
   };
 }
 
 async function loadRuntimeInfo() {
   try {
-    const rt = await api("/api/runtime?probe=0");
+    const rt = await api("/api/runtime");
     runtime.value = rt.runtime;
     const runtimeLine = runtimeSummary(runtime.value);
     pushLog(batch.logs, runtimeLine);
@@ -747,7 +749,7 @@ async function pickDirectory(target) {
     if (!path) return;
     if (target === "batchInput") {
       batch.inputDir = path;
-      batch.outputDir ||= `${path}\\split_result`;
+      batch.outputDir ||= `${path}/split_result`;
       pushLog(batch.logs, `选择输入目录：${path}`);
       await scanBatch();
     } else if (target === "batchOutput") {
@@ -767,7 +769,7 @@ async function pickFile() {
     const path = await choosePath("file", "选择单张照片");
     if (!path) return;
     single.source = path;
-    single.outputDir ||= path.replace(/\\[^\\]+$/, "\\split_result");
+    single.outputDir ||= path.replace(/[\\/][^\\/]+$/, "/split_result");
     single.fromBatch = false;
     single.batchImageId = "";
     pushLog(single.logs, `选择单张照片：${path}`);
@@ -1197,7 +1199,7 @@ function addBox() {
   pushUndo();
   const w = single.imageWidth;
   const h = single.imageHeight;
-  single.boxes.push(normalizeBox([Math.round(w * 0.25), Math.round(h * 0.25), Math.round(w * 0.75), Math.round(h * 0.75), null, null, null, false, false]));
+  single.boxes.push(normalizeBox([Math.round(w * 0.25), Math.round(h * 0.25), Math.round(w * 0.75), Math.round(h * 0.75), null, null, null, false, true]));
   selectedBox.value = single.boxes.length - 1;
   pushLog(single.logs, "手动新增检测框。");
 }
@@ -1205,6 +1207,8 @@ function addBox() {
 function deleteBox() {
   if (selectedBox.value == null) return;
   pushUndo();
+  const removed = single.boxes[selectedBox.value];
+  if (removed) single.boxes[selectedBox.value] = normalizeBox(removed, boxRotationMarker(removed), true);
   single.boxes.splice(selectedBox.value, 1);
   selectedBox.value = single.boxes.length ? Math.min(selectedBox.value, single.boxes.length - 1) : null;
   pushLog(single.logs, "删除检测框。");
@@ -1220,14 +1224,15 @@ function undoBox() {
 function splitBox(direction) {
   if (selectedBox.value == null) return;
   const box = single.boxes[selectedBox.value];
+  const marker = boxRotationMarker(box);
   pushUndo();
   if (direction === "vertical") {
     const mid = Math.round((box[0] + box[2]) / 2);
-    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], mid, box[3], null]), normalizeBox([mid, box[1], box[2], box[3], null]));
+    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], mid, box[3], marker], marker, true), normalizeBox([mid, box[1], box[2], box[3], marker], marker, true));
     pushLog(single.logs, "选中检测框已左右分割。");
   } else {
     const mid = Math.round((box[1] + box[3]) / 2);
-    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], box[2], mid, null]), normalizeBox([box[0], mid, box[2], box[3], null]));
+    single.boxes.splice(selectedBox.value, 1, normalizeBox([box[0], box[1], box[2], mid, marker], marker, true), normalizeBox([box[0], mid, box[2], box[3], marker], marker, true));
     pushLog(single.logs, "选中检测框已上下分割。");
   }
 }
@@ -1271,7 +1276,7 @@ function onDrag(event) {
   y1 = Math.max(0, Math.min(single.imageHeight - 10, y1));
   x2 = Math.max(x1 + 10, Math.min(single.imageWidth, x2));
   y2 = Math.max(y1 + 10, Math.min(single.imageHeight, y2));
-  single.boxes[index] = normalizeBox([Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2), boxRotationMarker(startBox), startBox[5] ?? null, startBox[6] ?? null, startBox[7] ?? false, startBox[8] ?? false]);
+  single.boxes[index] = normalizeBox([Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2), boxRotationMarker(startBox), startBox[5] ?? null, startBox[6] ?? null, startBox[7] ?? false, true]);
 }
 
 function stopDrag() {

@@ -7,7 +7,9 @@ from PIL import ImageDraw
 
 from .detection import split_image
 from .io_utils import iter_source_images, safe_name, target_dir_for_source, unique_output_path
+from .performance import jpeg_save_kwargs
 from .postprocess import refine_output_photo
+from .runtime_backend import configure_opencv_threads
 from .visualization import draw_preview_box
 
 
@@ -46,31 +48,36 @@ def save_split_photos(
         )
         image_name = safe_name(page_stem)
         for index, box in enumerate(boxes, start=1):
+            raw_crop = processed_image.crop(box)
             crop = refine_output_photo(
-                processed_image.crop(box),
+                raw_crop,
                 white_threshold=white_threshold,
                 skew_min_score_gain=skew_min_score_gain,
                 auto_face_rotate=auto_face_rotate,
                 background_mode=background_mode,
             )
+            if crop is not raw_crop:
+                raw_crop.close()
             target = unique_output_path(target_dir / f"{image_name}_{index:03d}.jpg", overwrite)
-            crop.save(
-                target,
-                "JPEG",
-                quality=quality,
-                subsampling=0,
-                optimize=True,
-                progressive=True,
-            )
-            saved.append(target)
+            try:
+                crop.save(target, **jpeg_save_kwargs(fast=True, quality=quality))
+                saved.append(target)
+            finally:
+                crop.close()
 
         if preview:
             preview_image = processed_image.copy()
-            draw = ImageDraw.Draw(preview_image)
-            for index, box in enumerate(boxes, start=1):
-                draw_preview_box(draw, box, f"{index:03d}", processed_image.width)
-            preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite)
-            preview_image.save(preview_path, "JPEG", quality=92)
+            try:
+                draw = ImageDraw.Draw(preview_image)
+                for index, box in enumerate(boxes, start=1):
+                    draw_preview_box(draw, box, f"{index:03d}", processed_image.width)
+                preview_path = unique_output_path(target_dir / f"分割预览_{image_name}.jpg", overwrite)
+                preview_image.save(preview_path, **jpeg_save_kwargs(fast=True, quality=92))
+            finally:
+                preview_image.close()
+        if processed_image is not image:
+            processed_image.close()
+        image.close()
 
     return saved
 
@@ -94,6 +101,7 @@ def process_source_for_cli(args: tuple[Any, ...]) -> dict[str, Any]:
         include_root_name,
     ) = args
     try:
+        configure_opencv_threads(worker_count=1)
         saved = save_split_photos(
             source,
             input_root,

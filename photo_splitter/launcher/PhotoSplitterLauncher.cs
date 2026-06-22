@@ -41,8 +41,6 @@ internal static class PhotoSplitterLauncher
         string selfName = Path.GetFileName(Application.ExecutablePath);
         string[] patterns =
         {
-            "photo_splitter_v*_cupy_cuda.exe",
-            "photo_splitter_demo_v*_cupy_cuda.exe",
             "photo_splitter_v*.exe",
             "photo_splitter_demo_v*.exe",
         };

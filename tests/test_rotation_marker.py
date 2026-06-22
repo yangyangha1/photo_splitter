@@ -51,7 +51,7 @@ class RotationMarkerTests(unittest.TestCase):
         with patch.dict("os.environ", {"PHOTO_SPLITTER_DETECT_WORKERS": "3"}):
             workers, reason = batch_worker_count("detect", 10)
         self.assertEqual(workers, 3)
-        self.assertEqual(reason, "PHOTO_SPLITTER_DETECT_WORKERS=3")
+        self.assertIn("PHOTO_SPLITTER_DETECT_WORKERS=3", reason)
 
 
 if __name__ == "__main__":

@@ -293,10 +293,14 @@ def split_box_on_empty_gaps(
     content_mask: np.ndarray,
     box: tuple[int, int, int, int],
     min_side: int,
+    depth: int = 0,
+    max_depth: int = 16,
 ) -> list[tuple[int, int, int, int]]:
     x1, y1, x2, y2 = box
     width = x2 - x1
     height = y2 - y1
+    if depth >= max_depth:
+        return [box]
     if width < min_side * 2 or height < min_side:
         return [box]
 
@@ -329,16 +333,16 @@ def split_box_on_empty_gaps(
         split_at = x1 + (column_gap[0] + column_gap[1]) // 2
         left = (x1, y1, split_at, y2)
         right = (split_at, y1, x2, y2)
-        return split_box_on_empty_gaps(content_mask, left, min_side) + split_box_on_empty_gaps(
-            content_mask, right, min_side
+        return split_box_on_empty_gaps(content_mask, left, min_side, depth + 1, max_depth) + split_box_on_empty_gaps(
+            content_mask, right, min_side, depth + 1, max_depth
         )
 
     if row_gap:
         split_at = y1 + (row_gap[0] + row_gap[1]) // 2
         top = (x1, y1, x2, split_at)
         bottom = (x1, split_at, x2, y2)
-        return split_box_on_empty_gaps(content_mask, top, min_side) + split_box_on_empty_gaps(
-            content_mask, bottom, min_side
+        return split_box_on_empty_gaps(content_mask, top, min_side, depth + 1, max_depth) + split_box_on_empty_gaps(
+            content_mask, bottom, min_side, depth + 1, max_depth
         )
 
     return [box]
@@ -721,10 +725,12 @@ def split_boxes_on_internal_separators(
     areas = np.asarray([(x2 - x1) * (y2 - y1) for x1, y1, x2, y2 in boxes], dtype=np.float32)
     median_area = float(np.median(areas)) if areas.size else 0.0
 
-    def split_one(box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+    def split_one(box: tuple[int, int, int, int], depth: int = 0) -> list[tuple[int, int, int, int]]:
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
+        if depth >= 16:
+            return [box]
         if width < 120 or height < 120:
             return [box]
 
@@ -762,9 +768,9 @@ def split_boxes_on_internal_separators(
                 right = crop_inner_content(gray, (x1 + b, y1, x2, y2), threshold=35)
                 parts = []
                 if looks_like_photo(rgb, left, min_area):
-                    parts.extend(split_one(left))
+                    parts.extend(split_one(left, depth + 1))
                 if looks_like_photo(rgb, right, min_area):
-                    parts.extend(split_one(right))
+                    parts.extend(split_one(right, depth + 1))
                 if len(parts) >= 2:
                     return parts
 
@@ -781,9 +787,9 @@ def split_boxes_on_internal_separators(
                 bottom = crop_inner_content(gray, (x1, y1 + b, x2, y2), threshold=35)
                 parts = []
                 if looks_like_photo(rgb, top, min_area):
-                    parts.extend(split_one(top))
+                    parts.extend(split_one(top, depth + 1))
                 if looks_like_photo(rgb, bottom, min_area):
-                    parts.extend(split_one(bottom))
+                    parts.extend(split_one(bottom, depth + 1))
                 if len(parts) >= 2:
                     return parts
 
@@ -1727,4 +1733,6 @@ def detect_photo_boxes(
         background_mode=background_mode,
         detection_strategy=detection_strategy,
     )
+    if _processed_image is not image:
+        _processed_image.close()
     return boxes

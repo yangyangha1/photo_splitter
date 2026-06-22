@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 from PIL import Image, ImageOps, ImageSequence
@@ -47,19 +48,23 @@ def normalize_source_page(page: Image.Image) -> Image.Image:
     return image.convert("RGB").copy()
 
 
-def iter_source_images(source: Path) -> list[tuple[str, Image.Image]]:
+def count_source_pages(source: Path) -> int:
+    """Return the number of readable pages without copying them into memory."""
+    with Image.open(source) as image:
+        return int(getattr(image, "n_frames", 1) or 1)
+
+
+def iter_source_images(source: Path) -> Iterator[tuple[str, Image.Image]]:
     """读取源图片。
 
     这里会把 PIL 图片复制到内存后关闭源文件，避免批量处理大量 TIFF/JPG 时占用文件句柄。
     对多页 TIFF，按“文件名_p001、文件名_p002...”拆成多个页面处理。
     """
-    pages: list[tuple[str, Image.Image]] = []
     with Image.open(source) as image:
         page_count = getattr(image, "n_frames", 1)
         for index, page in enumerate(ImageSequence.Iterator(image), start=1):
             stem = source.stem if page_count <= 1 else f"{source.stem}_p{index:03d}"
-            pages.append((stem, normalize_source_page(page)))
-    return pages
+            yield stem, normalize_source_page(page)
 
 
 def unique_output_path(path: Path, overwrite: bool) -> Path:
